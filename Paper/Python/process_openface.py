@@ -3,9 +3,9 @@ import subprocess
 import sys
 
 # Directories
-openface_exe_path = r"C:\Users\IT102078-admin\Documents\OpenFace_2.2.0_win_x64\FeatureExtraction.exe"
-source_path = r"C:\Users\IT102078-admin\Documents\openface-outputs\real\videos"
-target_path = r"C:\Users\IT102078-admin\Documents\openface-outputs\real-output"
+openface_exe_path = r"OpenFace_2.2.0_win_x64\FeatureExtraction.exe"
+source_path = r"openface-outputs\real\videos"
+target_path = r"openface-outputs\real-output"
 
 video_extensions = ['.avi', '.mp4']
 

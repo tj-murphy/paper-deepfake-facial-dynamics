@@ -4,9 +4,9 @@ import random
 import re
 
 # Directories
-REAL_VIDEO_DIR = r"C:\Users\IT102078-admin\Documents\openface-outputs\real\videos"
-FAKE_VIDEO_DIR = r"C:\Users\IT102078-admin\OneDrive - University of Bristol\Deepfakes\FaceForesics - Deepfakes\manipulated_sequences\DeepFakeDetection\c23\videos"
-TARGET_DIR = r"C:\Users\IT102078-admin\Documents\openface-outputs\fake"
+REAL_VIDEO_DIR = r"openface-outputs\real\videos"
+FAKE_VIDEO_DIR = r"FaceForesics - Deepfakes\manipulated_sequences\DeepFakeDetection\c23\videos"
+TARGET_DIR = r"openface-outputs\fake"
 
 
 def extract_real_video_parts(filename):

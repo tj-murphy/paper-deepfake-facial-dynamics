@@ -3,8 +3,8 @@ import glob
 import subprocess
 
 # Input and outpur directories
-input_dir = '/Users/timmurphy/OneDrive - University of Bristol/Deepfakes/FaceForesics - Deepfakes/original_sequences/actors/c23/videos'
-output_dir = '/Users/timmurphy/OneDrive - University of Bristol/Documents/DeepfakeExperiment/OpenFace-outputs'
+input_dir = '/Deepfakes/FaceForesics - Deepfakes/original_sequences/actors/c23/videos'
+output_dir = '/OpenFace-outputs'
 
 # Make sure output dir exists
 os.makedirs(output_dir, exist_ok=True)
@@ -18,7 +18,7 @@ for ext in video_extensions:
     video_files.extend(glob.glob(os.path.join(input_dir, ext)))
 
 # Path to openface binary
-openface_path = '/Users/timmurphy/OneDrive - University of Bristol/Documents/DeepfakeExperiment/OpenFace_2.2.0_win_x64/FeatureExtraction.exe'
+openface_path = 'OpenFace_2.2.0_win_x64/FeatureExtraction.exe'
 
 # Loop through each video file
 for video_path in video_files:
