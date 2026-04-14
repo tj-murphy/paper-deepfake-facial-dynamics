@@ -1,0 +1,2 @@
+"0","dta_gaze_aggregated <- read_csv(""../../../Data/Paper 1/dta_dfplf_bris_23_24_birm_22_23_eytrk_behav_quest1_PLD(in).csv"")"
+"0","dta_gaze_raw <- readRDS(""../../../Data/Paper 1/dta_df_plfstim_gp_all_fix_stim_only1.rds"")"

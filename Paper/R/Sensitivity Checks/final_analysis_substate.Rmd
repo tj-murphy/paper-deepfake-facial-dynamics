@@ -1,0 +1,503 @@
+---
+title: "final_analysis_substate"
+output:
+  pdf_document: default
+---
+
+# Introduction
+
+This script contains the substate analysis of the data taken from 'final_analysis_NMF_check.Rmd'. The goal is to isolate time points corresponding to "transitions". From the feature importance metrics, we found that autocorrelation is an important feature for the classifiers, relating to the differences between consecutive frames, suggesting that the predictive signal may be concentrated in certain groups of consecutive frames (or transitions between facial expressions). The idea is that by filtering the data to only include these transition frames, we are cutting out the "dead" time where there is little to no predictive signal. In theory, this should boost accuracy of our classifier models.
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(dplyr)
+options(scipen = 999, digits = 4)
+
+# Load data
+dta_nmf_input_train <- readRDS("dta_nmf_input_train.RDS")
+dta_nmf_input_test <-  readRDS("dta_nmf_input_test.RDS")
+```
+
+# Training Data
+
+In this section:
+
+-   Calculate the velocity (frame-to-frame change) for each representative AU for every video.
+
+-   Determine transition threshold.
+
+-   Apply threshold to find transition frames.
+
+-   Extract CMFTS features from transition frames.
+
+## Calculate Velocity
+
+```{r}
+dta_train_velocity <- dta_nmf_input_train %>%
+  select(video_filename, isfakeorreal, emotion, valence, frame, AU01_inner_brow_raiser, AU12_lip_corner_puller, AU17_chin_raiser) %>%
+  pivot_longer(
+    cols = starts_with("AU"),
+    names_to = "AU_name",
+    values_to = "activation"
+  ) %>%
+  group_by(video_filename, AU_name) %>%
+  arrange(frame, .by_group = TRUE) %>%
+  mutate(
+    # Velocity = diff between current and prev frame's activation
+    velocity = activation - lag(activation)
+  ) %>%
+  ungroup()
+
+head(dta_train_velocity)
+```
+
+## Calculate Threshold
+
+Now to calculate the global threshold that will be applied to both training and test sets.
+
+I will start with a threshold of 1 SD. Since values that fall within +/- 1 standard deviation of the mean are generally considered typical, this defines a transition as a change that is more significant than the typical fluctuations.
+
+```{r}
+# Calculate SD of all velocity values in training set
+global_velocity_sd_train <- sd(dta_train_velocity$velocity, na.rm = TRUE)
+global_velocity_mean_train <- mean(dta_train_velocity$velocity, na.rm = TRUE)
+
+# Threshold will be 1 standard deviation to start
+# Will also define a range for sensitivity analysis
+TRANSITION_THRESHOLD_1SD <- 1 * global_velocity_sd_train
+TRANSITION_THRESHOLD_05SD <- 0.5 * global_velocity_sd_train
+TRANSITION_THRESHOLD_075SD <- 0.75 * global_velocity_sd_train
+TRANSITION_THRESHOLD_125SD <- 1.25 * global_velocity_sd_train
+TRANSITION_THRESHOLD_15SD <- 1.5 * global_velocity_sd_train
+
+print(paste("Velocity mean:", round(global_velocity_mean_train, 4)))
+print(paste("Transition threshold (0.5 SD):", round(TRANSITION_THRESHOLD_05SD, 4)))
+print(paste("Transition threshold (0.75 SD):", round(TRANSITION_THRESHOLD_075SD, 4)))
+print(paste("Transition threshold (1 SD):", round(TRANSITION_THRESHOLD_1SD, 4)))
+print(paste("Transition threshold (1.25 SD):", round(TRANSITION_THRESHOLD_125SD, 4)))
+print(paste("Transition threshold (1.5 SD):", round(TRANSITION_THRESHOLD_15SD, 4)))
+```
+
+Visualisation:
+
+```{r, fig.height=3, fig.width=5}
+plt_au_velocity_threshold <- ggplot(dta_train_velocity, aes(x = velocity)) +
+  geom_density(fill = "skyblue", alpha = 0.7, colour = "black") +
+  geom_vline(xintercept = global_velocity_mean_train,
+             colour = "red",
+             linewidth = 0.6,
+             linetype = "solid") +
+  geom_vline(xintercept = c(TRANSITION_THRESHOLD_1SD, -TRANSITION_THRESHOLD_15SD),
+             colour = "darkgreen",
+             linewidth = 0.8,
+             linetype = "dotted") +
+  labs(
+    title = "Distribution of AU Velocity with Transition Thresholds",
+    subtitle = "Calculated from Training Set",
+    x = "Velocity",
+    y = "Density"
+  ) +
+  coord_cartesian(xlim = c(-0.5, 0.5)) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+plt_au_velocity_threshold
+
+ggsave(
+  filename = "plt_au_velocity_threshold.pdf",
+  plot = plt_au_velocity_threshold,
+  height = 3,
+  width = 5,
+  device = cairo_pdf
+)
+```
+
+The red line shows the mean velocity. The green dotted lines show the 0.5 SD (left) and 1.5 SD (right). As we can see, the mean is 0.0002, indicating that a lot of the training data is "dead" time.
+
+## Apply Threshold
+
+```{r}
+dta_train_substates_1SD <- dta_train_velocity %>%
+  mutate(
+    # If absolute velocity is greater than threshold, label transition, else sustain.
+    substate = ifelse(abs(velocity) > TRANSITION_THRESHOLD_1SD, "transition", "sustain")
+  )
+
+head(dta_train_substates_1SD, 15)
+```
+
+Let's look at the sustain/transition ratio for different conditions:
+
+```{r}
+# Emotion
+print(prop.table( table(dta_train_substates_1SD$substate, dta_train_substates_1SD$emotion), margin=2) * 100)
+
+# Valence
+print(prop.table( table(dta_train_substates_1SD$substate, dta_train_substates_1SD$valence), margin=2) * 100)
+
+# Real fake
+print(prop.table( table(dta_train_substates_1SD$substate, dta_train_substates_1SD$isfakeorreal), margin=2) * 100)
+```
+
+Videos with emotion have more transition frames than videos without (20.86% vs 13.63%). Videos with positive emotions have the highest percentage of transition frames (25.5%). Negative valence videos have the lowest percentage of transition frames (12.76%). Real and fake videos have roughly the same amount of transition frames (fake = 17.80%, real = 18.13%).
+
+## Identify Transition Blocks
+
+We cannot simply concatenate all transition frames into one large block and run CMFTS feature extraction on this. This is because CMFTS assumes the difference between consecutive activation values is 1 frame, but this wouldn't be the case here as we are stitching together frames from across different time points.
+
+Instead, I will identify transition blocks - which will each be treated as a single dynamic event. I will then calculate some basic features for each block (e.g., duration, magnitude) instead of CMFTS features (because CMFTS requires a minimum of 5 frames, some transition blocks will have less than this).
+
+```{r}
+# Identify transition blocks
+
+dta_train_transition_blocks <- dta_train_substates_1SD %>%
+  # No grouping to prevent ID from starting from 1 each video
+  arrange(video_filename, AU_name, frame) %>%
+  mutate(
+    sub = tolower(str_trim(as.character(substate))),
+    # New transition block starts when:
+    # Row is transition AND previous row is either different video/AU or not transition
+    is_new = sub == "transition" & (
+      is.na(lag(sub)) |
+        lag(video_filename) != video_filename |
+        lag(AU_name) != AU_name |
+        lag(sub) != "transition"
+    ),
+    id_transition_block_raw = cumsum(replace_na(is_new, FALSE)),
+    id_transition_block = dplyr::if_else(sub == "transition",
+                                         id_transition_block_raw,
+                                         NA_integer_)
+  ) %>%
+  select(-sub, -is_new, -id_transition_block_raw) %>%
+  ungroup()
+
+
+dta_train_transition_blocks <- dta_train_transition_blocks %>%
+  filter(substate == "transition")
+
+head(dta_train_transition_blocks, 20)
+```
+
+We now have a working transition block id column, and can now filter the data to just include consecutive transition blocks.
+
+## Calculate Features For Each Block
+
+The next step is to calculate features that describe each transition block. We want to essentially convert the blocks of frames into a set of fixed numerical features that the classifiers can use. I will not be using CMFTS feature extraction here as it requires a minimum of 5 frames per time series.
+
+```{r}
+dta_transition_block_features <- dta_train_transition_blocks %>%
+  group_by(video_filename, AU_name, id_transition_block) %>%
+  summarise(
+    # Duration (number of frames in the block)
+    duration = n(),
+    # Magnitude change (net change from start to end of block)
+    magnitude_change = dplyr::last(activation) - dplyr::first(activation),
+    # Peak velocity (most abrupt change within event)
+    peak_velocity = max(abs(velocity), na.rm = TRUE),
+    # Mean absolute velocity (average speed of change during block)
+    mean_abs_velocity = mean(abs(velocity), na.rm = TRUE),
+    
+    .groups = "drop"
+  ) %>%
+  ungroup()
+
+
+head(dta_transition_block_features, 20)
+```
+
+Classifier will need 1 row per video, so need to aggregate features to the video level.
+
+```{r}
+dta_train_classifier <- dta_transition_block_features %>%
+  group_by(video_filename, AU_name) %>%
+  # Summarise features of all events for each AU in each video
+  summarise(
+    # Average event duration for each AU in each video
+    mean_duration = mean(duration, na.rm = TRUE),
+    # Maximum peak velocity across all events
+    max_peak_velocity = max(peak_velocity, na.rm = TRUE),
+    # Avereage magnitude of change
+    mean_magnitude_change = mean(magnitude_change, na.rm = TRUE),
+    # How many times did the AU have a transition event?
+    event_count = n(),
+    .groups = "drop"
+  ) %>%
+  ungroup() %>%
+  pivot_wider(
+    id_cols = video_filename,
+    names_from = AU_name,
+    values_from = c(mean_duration, max_peak_velocity, mean_magnitude_change, event_count)
+  )
+
+head(dta_train_classifier, 20)
+```
+
+## Prepare for Classifier
+
+```{r}
+# Table of labels
+train_labels <- dta_nmf_input_train %>%
+  distinct(video_filename, isfakeorreal, emotion, valence)
+
+# Join labels
+dta_train_final <- dta_train_classifier %>%
+  left_join(train_labels, by = "video_filename")
+
+# Replace NAs with 0
+dta_train_final <- dta_train_final %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0)))
+
+dta_train_final$isfakeorreal <- factor(dta_train_final$isfakeorreal, levels = c("real", "fake"))
+
+# Reorder columns
+dta_train_final <- dta_train_final %>%
+  select(video_filename, emotion, valence, isfakeorreal, everything())
+```
+
+# Test Data
+
+## Calculate Velocity
+
+```{r}
+dta_test_velocity <- dta_nmf_input_test %>%
+  select(video_filename, isfakeorreal, emotion, valence, frame, AU01_inner_brow_raiser, AU12_lip_corner_puller, AU17_chin_raiser) %>%
+  pivot_longer(
+    cols = starts_with("AU"),
+    names_to = "AU_name",
+    values_to = "activation"
+  ) %>%
+  group_by(video_filename, AU_name) %>%
+  arrange(frame, .by_group = TRUE) %>%
+  mutate(
+    # Velocity = diff between current and prev frame's activation
+    velocity = activation - lag(activation)
+  ) %>%
+  ungroup()
+
+head(dta_test_velocity)
+```
+
+## Apply Threshold
+
+I will apply the threshold calculated for the training data to the test data.
+
+```{r}
+dta_test_substates_1SD <- dta_test_velocity %>%
+  mutate(
+    substate = ifelse(abs(velocity) > TRANSITION_THRESHOLD_1SD, "transition", "sustain")
+  )
+```
+
+## Identify Transition Blocks
+
+```{r}
+# Identify transition blocks
+
+dta_test_transition_blocks <- dta_test_substates_1SD %>%
+  # No grouping to prevent ID from starting from 1 each video
+  arrange(video_filename, AU_name, frame) %>%
+  mutate(
+    sub = tolower(str_trim(as.character(substate))),
+    # New transition block starts when:
+    # Row is transition AND previous row is either different video/AU or not transition
+    is_new = sub == "transition" & (
+      is.na(lag(sub)) |
+        lag(video_filename) != video_filename |
+        lag(AU_name) != AU_name |
+        lag(sub) != "transition"
+    ),
+    id_transition_block_raw = cumsum(replace_na(is_new, FALSE)),
+    id_transition_block = dplyr::if_else(sub == "transition",
+                                         id_transition_block_raw,
+                                         NA_integer_)
+  ) %>%
+  select(-sub, -is_new, -id_transition_block_raw) %>%
+  ungroup()
+
+
+dta_test_transition_blocks <- dta_test_transition_blocks %>%
+  filter(substate == "transition")
+
+head(dta_test_transition_blocks, 20)
+```
+
+## Calculate Features For Each Block
+
+```{r}
+dta_test_transition_block_features <- dta_test_transition_blocks %>%
+  group_by(video_filename, AU_name, id_transition_block) %>%
+  summarise(
+    # Duration (number of frames in the block)
+    duration = n(),
+    # Magnitude change (net change from start to end of block)
+    magnitude_change = dplyr::last(activation) - dplyr::first(activation),
+    # Peak velocity (most abrupt change within event)
+    peak_velocity = max(abs(velocity), na.rm = TRUE),
+    # Mean absolute velocity (average speed of change during block)
+    mean_abs_velocity = mean(abs(velocity), na.rm = TRUE),
+    
+    .groups = "drop"
+  ) %>%
+  ungroup()
+
+
+head(dta_test_transition_block_features, 20)
+```
+
+Now to format so that each row corresponds to 1 video:
+
+```{r}
+dta_test_classifier <- dta_test_transition_block_features %>%
+  group_by(video_filename, AU_name) %>%
+  # Summarise features of all events for each AU in each video
+  summarise(
+    # Average event duration for each AU in each video
+    mean_duration = mean(duration, na.rm = TRUE),
+    # Maximum peak velocity across all events
+    max_peak_velocity = max(peak_velocity, na.rm = TRUE),
+    # Avereage magnitude of change
+    mean_magnitude_change = mean(magnitude_change, na.rm = TRUE),
+    # How many times did the AU have a transition event?
+    event_count = n(),
+    .groups = "drop"
+  ) %>%
+  ungroup() %>%
+  pivot_wider(
+    id_cols = video_filename,
+    names_from = AU_name,
+    values_from = c(mean_duration, max_peak_velocity, mean_magnitude_change, event_count)
+  )
+
+head(dta_test_classifier, 20)
+```
+
+## Prepare for Classifier
+
+```{r}
+# Table of labels
+test_labels <- dta_nmf_input_test %>%
+  distinct(video_filename, isfakeorreal, emotion, valence)
+
+# Join labels
+dta_test_final <- dta_test_classifier %>%
+  left_join(test_labels, by = "video_filename")
+
+# Replace NAs with 0
+dta_test_final <- dta_test_final %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0)))
+
+dta_test_final$isfakeorreal <- factor(dta_test_final$isfakeorreal, levels = c("real", "fake"))
+
+# Reorder columns
+dta_test_final <- dta_test_final %>%
+  select(video_filename, emotion, valence, isfakeorreal, everything())
+```
+
+The training and test data is ready.
+
+# Classifiers
+
+## Random Forest
+
+```{r}
+ctrl <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+model_rf <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_train_final[-1:-3],
+  method = "rf",
+  metric = "ROC",
+  trControl = ctrl
+)
+
+print(model_rf)
+```
+
+Evaluate on test data:
+
+```{r}
+predictions <- predict(model_rf, newdata = dta_test_final)
+
+# Confusion matrix
+rf_performance <- caret::confusionMatrix(
+  data = predict(model_rf, newdata = dta_test_final),
+  reference = dta_test_final$isfakeorreal,
+  positive = "fake"
+)
+
+rf_performance
+```
+
+Accuracy = 56.40%
+
+95% CI = (0.458, 0.666)
+
+NIR = 0.5
+
+P = 0.128
+
+Kappa = 0.128
+
+## C5.0B
+
+```{r}
+ctrl <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+model_c50 <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_train_final[-1:-3],
+  method = "C5.0",
+  metric = "ROC",
+  trControl = ctrl,
+  tuneGrid = expand.grid(
+    model = "tree",
+    trials = c(1, 10, 20),  # number of boosting iterations
+    winnow = FALSE)
+)
+```
+
+Evaluate on test data:
+
+```{r}
+predictions <- predict(model_c50, newdata = dta_test_final)
+
+# Confusion matrix
+c50_performance <- caret::confusionMatrix(
+  data = predict(model_c50, newdata = dta_test_final),
+  reference = dta_test_final$isfakeorreal,
+  positive = "fake"
+)
+
+c50_performance
+```
+
+Accuracy = 54.30%
+
+95% CI = (0.437, 0.646)
+
+NIR = 0.5
+
+P = 0.235
+
+Kappa = 0.085

@@ -1,0 +1,1274 @@
+---
+title: "movement_analysis"
+output:
+  pdf_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Introduction
+
+Previous sensitivity analysis (`final_analysis_NMF_check_valence_2.Rmd`)
+found that there are different degradation patterns between real and
+fake videos depending on emotion (positive, neutral, negative). The main
+goal of that analysis was to determine whether the finding from the main
+script (`final_analysis_NMF_check.Rmd`) that real vs fake classifying
+performance was better in emotion videos was due to emotional
+expressions having more movement or due to genuine degradation in
+emotional signal.
+
+However, this is still unsolved. This current script aims to directly
+test whether there are differences in facial movement between real and
+fake videos, as well as between different emotions.
+
+# Load Libraries & Data
+
+```{r}
+library(tidyverse)
+library(dplyr)
+```
+
+```{r}
+# Load data
+dta_preprocessed <- read.csv("../../CSV files/OpenFace files/full_dataset_preprocessed.csv")
+dta_nmf_input_train <- read.csv("../../CSV files/dta_nmf_input_train.csv")
+dta_nmf_input_test <- read.csv("../../CSV files/dta_nmf_input_test.csv")
+```
+
+# Movement Metrics
+
+## Frame-Level
+
+```{r}
+# Function to calculate derivatives
+fn_calculate_derivatives <- function(x) {
+  # Velocity (first derivative)
+  velocity <- c(0, diff(x))
+  
+  # Acceleration (second derivative)
+  acceleration <- c(0, diff(velocity))
+  
+  # Jerk (third derivative)
+  jerk <- c(0, diff(acceleration))
+  
+  return(list(
+    velocity = velocity,
+    acceleration = acceleration,
+    jerk = jerk
+  ))
+}
+
+au_cols <- names(dta_nmf_input_train)[grepl("^AU", names(dta_nmf_input_train))]
+
+# Calculate derivatives for each AU per video
+dta_frame_movement_train <- dta_nmf_input_train %>%
+  group_by(video_filename) %>%
+  mutate(
+    # For each AU, calculate derivatives
+    across(all_of(au_cols),
+           ~ calculate_derivatives(.)$velocity,
+           .names = "vel_{col}"),
+    across(all_of(au_cols),
+           ~ abs(calculate_derivatives(.)$velocity),  # Absolute velocity
+           .names = "abs_vel_{col}"),
+    across(all_of(au_cols),
+           ~ calculate_derivatives(.)$acceleration,
+           .names = "acc_{col}"),
+    across(all_of(au_cols),
+           ~ abs(calculate_derivatives(.)$acceleration),
+           .names = "abs_acc_{col}"),
+    across(all_of(au_cols),
+           ~ calculate_derivatives(.)$jerk,
+           .names = "jerk_{col}")
+  ) %>%
+  ungroup()
+
+# Calculate total movement per frame (sum of absolute velocities across all AUs)
+vel_cols <- names(dta_frame_movement_train)[grepl("^abs_vel_AU", names(dta_frame_movement_train))]
+
+dta_frame_movement_train <- dta_frame_movement_train %>%
+  mutate(
+    total_movement = rowSums(select(., all_of(vel_cols)), na.rm = TRUE),
+    total_acceleration = rowSums(select(., starts_with("abs_acc_AU")), na.rm = TRUE)
+  )
+```
+
+We now have the following metrics:
+
+-   Velocity
+
+-   Absolute velocity
+
+-   Acceleration
+
+-   Absolute acceleration
+
+-   Jerk
+
+-   Total movement (sum of all absolute velocity)
+
+-   Total acceleration
+
+Absolute values were calculated for velocity and acceleration because
+they can have a negative and positive value, which can sometimes lead to
+cancelling out and making it look like no movement occurred (e.g., +10,
+then -10 = 0, suggesting the face never moved).
+
+## Video-Level
+
+```{r}
+# Calculate video-level summaries
+dta_video_movement_train <- dta_frame_movement_train %>%
+  group_by(video_filename, corresponding_video, 
+           scene_name, isfakeorreal, emotion, valence) %>%
+  summarise(
+    # Global movement metrics
+    mean_movement = mean(total_movement, na.rm = TRUE),
+    sd_movement = sd(total_movement, na.rm = TRUE),
+    max_movement = max(total_movement, na.rm = TRUE),
+    movement_95th = quantile(total_movement, 0.95, na.rm = TRUE),
+    
+    # Movement variability (coefficient of variation)
+    movement_cv = sd_movement / mean_movement,
+    
+    # Peak movement frequency (proportion of frames exceeding mean + 2*SD)
+    threshold = mean(total_movement, na.rm = TRUE) + 2 * sd(total_movement, na.rm = TRUE),
+    peak_freq = sum(total_movement > threshold, na.rm = TRUE) / n(),
+    
+    # Acceleration metrics
+    mean_acceleration = mean(total_acceleration, na.rm = TRUE),
+    max_acceleration = max(total_acceleration, na.rm = TRUE),
+    
+    .groups = 'drop'
+  ) %>%
+  select(-threshold)
+
+# Calculate movement smoothness (spectral arc length)
+fn_calculate_smoothness <- function(movement_signal) {
+  if(length(movement_signal) < 10) return(NA)
+  
+  # Compute FFT
+  fft_result <- abs(fft(movement_signal))
+  
+  # Spectral arc length (simplified version)
+  arc_length <- sum(sqrt(1 + diff(fft_result[1:(length(fft_result)/2)])^2))
+  
+  # Normalize by signal length
+  return(-log(arc_length / length(movement_signal)))  # Higher = smoother
+}
+
+# Add smoothness metric
+dta_smoothness_train <- dta_frame_movement_train %>%
+  group_by(video_filename) %>%
+  summarise(
+    movement_smoothness = fn_calculate_smoothness(total_movement),
+    .groups = 'drop'
+  )
+
+dta_video_movement_train <- dta_video_movement_train %>%
+  left_join(dta_smoothness_train, by = "video_filename")
+
+cat("Video-level movement metrics calculated.\n")
+cat("Total videos:", nrow(dta_video_movement_train), "\n")
+cat("Real videos:", sum(dta_video_movement_train$isfakeorreal == "real"), "\n")
+cat("Fake videos:", sum(dta_video_movement_train$isfakeorreal == "fake"), "\n")
+```
+
+Now also have the following video-level movement metrics:
+
+-   mean_movement (avg of total movement across all frames)
+
+-   max_movement (highest single spike in entire video)
+
+-   movement_95th (95th percentile of movement - upper limit of normal
+    high activity for that video)
+
+-   sd_movement (how much movement varies from avg)
+
+-   movement_cv (coefficient of variation - how inconsistent movement is
+    relative to how much movement there is).
+
+-   peak_freq (percentage of frames where movement exceeds threshold of
+    mean+2SD)
+
+-   mean_acceleration
+
+-   max_acceleration
+
+-   movement_smoothness (calculated using FFT and spectral arc length,
+    looks at the frequency of movement signal. A high value = smooth,
+    biological movement. Low value = jittery, noisy or robotic movement)
+
+# Paired T-Tests
+
+```{r}
+dta_video_movement_train <- dta_video_movement_train %>%
+  mutate(
+    # Remove file extensions (e.g., .mp4, .avi) to ensure matches
+    clean_filename = str_remove(video_filename, "\\.[^.]+$"),
+    clean_corresponding = str_remove(corresponding_video, "\\.[^.]+$"),
+    
+    # LOGIC: 
+    # If it's REAL, its pair ID is its own name.
+    # If it's FAKE, its pair ID is the corresponding source video.
+    pair_id = ifelse(isfakeorreal == "real", 
+                     clean_filename, 
+                     clean_corresponding)
+  )
+
+# 2. Check if the IDs actually overlap now
+real_ids <- dta_video_movement_train %>% filter(isfakeorreal == "real") %>% pull(pair_id)
+fake_ids <- dta_video_movement_train %>% filter(isfakeorreal == "fake") %>% pull(pair_id)
+
+cat("Unique Real IDs:", length(unique(real_ids)), "\n")
+cat("Unique Fake IDs:", length(unique(fake_ids)), "\n")
+cat("Intersecting IDs:", length(intersect(real_ids, fake_ids)), "\n")
+
+# 3. Perform the Split and Join using the new 'pair_id'
+dta_real <- dta_video_movement_train %>% 
+  filter(isfakeorreal == "real") %>%
+  select(pair_id, everything()) %>%
+  rename_with(~paste0(., "_real"), -c(pair_id))
+
+dta_fake <- dta_video_movement_train %>% 
+  filter(isfakeorreal == "fake") %>%
+  select(pair_id, everything()) %>%
+  rename_with(~paste0(., "_fake"), -c(pair_id))
+
+# Join strictly on pair_id
+dta_paired_train <- inner_join(dta_real, dta_fake, by = "pair_id")
+
+cat("\n=== PAIRING DIAGNOSTICS (ATTEMPT 2) ===\n")
+cat("Successfully Paired:", nrow(dta_paired_train), "\n")
+```
+
+Now, `dta_paired_train` has two of the same columns for everything,
+except one is for the real video and the other is for the fake video in
+a pair.
+
+## Real vs. Fake
+
+```{r}
+cat("\n=== OVERALL PAIRED T-TESTS (Real vs Fake) ===\n\n")
+
+# Test mean movement
+t_mean <- t.test(dta_paired_train$mean_movement_real, 
+                 dta_paired_train$mean_movement_fake, 
+                 paired = TRUE)
+cat("Mean Movement:\n")
+cat(sprintf("  Real: %.3f ± %.3f\n", 
+            mean(dta_paired_train$mean_movement_real, na.rm = TRUE),
+            sd(dta_paired_train$mean_movement_real, na.rm = TRUE)))
+cat(sprintf("  Fake: %.3f ± %.3f\n", 
+            mean(dta_paired_train$mean_movement_fake, na.rm = TRUE),
+            sd(dta_paired_train$mean_movement_fake, na.rm = TRUE)))
+cat(sprintf("  Difference: %.3f (95%% CI: [%.3f, %.3f])\n",
+            t_mean$estimate, t_mean$conf.int[1], t_mean$conf.int[2]))
+cat(sprintf("  t(%d) = %.2f, p = %.4f\n\n", 
+            t_mean$parameter, t_mean$statistic, t_mean$p.value))
+
+# Test movement variability
+t_cv <- t.test(dta_paired_train$movement_cv_real, 
+               dta_paired_train$movement_cv_fake, 
+               paired = TRUE)
+cat("Movement Variability (CV):\n")
+cat(sprintf("  Real: %.3f ± %.3f\n", 
+            mean(dta_paired_train$movement_cv_real, na.rm = TRUE),
+            sd(dta_paired_train$movement_cv_real, na.rm = TRUE)))
+cat(sprintf("  Fake: %.3f ± %.3f\n", 
+            mean(dta_paired_train$movement_cv_fake, na.rm = TRUE),
+            sd(dta_paired_train$movement_cv_fake, na.rm = TRUE)))
+cat(sprintf("  Difference: %.3f (95%% CI: [%.3f, %.3f])\n",
+            t_cv$estimate, t_cv$conf.int[1], t_cv$conf.int[2]))
+cat(sprintf("  t(%d) = %.2f, p = %.4f\n\n", 
+            t_cv$parameter, t_cv$statistic, t_cv$p.value))
+
+# Test peak frequency
+t_peak <- t.test(dta_paired_train$peak_freq_real, 
+                 dta_paired_train$peak_freq_fake, 
+                 paired = TRUE)
+cat("Peak Movement Frequency:\n")
+cat(sprintf("  Real: %.3f ± %.3f\n", 
+            mean(dta_paired_train$peak_freq_real, na.rm = TRUE),
+            sd(dta_paired_train$peak_freq_real, na.rm = TRUE)))
+cat(sprintf("  Fake: %.3f ± %.3f\n", 
+            mean(dta_paired_train$peak_freq_fake, na.rm = TRUE),
+            sd(dta_paired_train$peak_freq_fake, na.rm = TRUE)))
+cat(sprintf("  Difference: %.3f (95%% CI: [%.3f, %.3f])\n",
+            t_peak$estimate, t_peak$conf.int[1], t_peak$conf.int[2]))
+cat(sprintf("  t(%d) = %.2f, p = %.4f\n\n", 
+            t_peak$parameter, t_peak$statistic, t_peak$p.value))
+```
+
+Mean movement:
+
+-   No statistical difference in average speed of the face between real
+    and fake.
+
+Movement variability (CV):
+
+-   Highly significant (p \< 0.0001) Real: 0.690 \| Fake: 0.643
+
+-   Real videos have a significantly higher Coefficient of Variation
+    than fake videos.
+
+-   CV = SD/Mean, and since we know that the means are the same, we know
+    that real videos have a higher SD.
+
+-   Real humans are dynamic, we have a lot of variability in our
+    movement. In fakes, their movement variability hovers closer to the
+    average movement more often than in real videos. They lack the full
+    dynamic range of a real human. They are unnaturally consistent.
+
+Peak movement frequency:
+
+-   Not significant, both groups (real + fake) cross the high movement
+    threshold (mean + 2SD) about 4.5% of the time.
+
+-   Deepfakes do not have sudden glitch spikes in their facial movement
+    (sudden huge movement jumps).
+
+-   It could be possible that there are glitches in movement but they
+    are micro ones and do not cross the threshold. Or its possible that
+    deepfakes are quite smooth.
+
+Overall, these findings suggest that the emotional signal is not getting
+degraded, it is infact being preserved (mean movement finding). What is
+actually happening is signal homogenisation, where the faceswap is
+preserving the average motion but smoothing out the variability. The
+degradation is actually a loss of dynamic contrast.
+
+```{r}
+cat("\n=== MISSING PAIRED T-TESTS (Force & Intensity) ===\n")
+
+# 1. Test Mean Acceleration
+t_mean_acc <- t.test(dta_paired_train$mean_acceleration_real, 
+                     dta_paired_train$mean_acceleration_fake, 
+                     paired = TRUE)
+cat("Mean Acceleration:\n")
+cat(sprintf("  Real: %.3f\n", mean(dta_paired_train$mean_acceleration_real, na.rm=T)))
+cat(sprintf("  Fake: %.3f\n", mean(dta_paired_train$mean_acceleration_fake, na.rm=T)))
+cat(sprintf("  Diff: %.3f | p-value: %.4f %s\n\n", 
+            t_mean_acc$estimate, t_mean_acc$p.value,
+            ifelse(t_mean_acc$p.value < 0.05, "*SIG*", "")))
+
+# 2. Test Max Acceleration
+t_max_acc <- t.test(dta_paired_train$max_acceleration_real, 
+                    dta_paired_train$max_acceleration_fake, 
+                    paired = TRUE)
+cat("Max Acceleration:\n")
+cat(sprintf("  Real: %.3f\n", mean(dta_paired_train$max_acceleration_real, na.rm=T)))
+cat(sprintf("  Fake: %.3f\n", mean(dta_paired_train$max_acceleration_fake, na.rm=T)))
+cat(sprintf("  Diff: %.3f | p-value: %.4f %s\n\n", 
+            t_max_acc$estimate, t_max_acc$p.value,
+            ifelse(t_max_acc$p.value < 0.05, "*SIG*", "")))
+
+# 3. Test Max Movement
+t_max_mov <- t.test(dta_paired_train$max_movement_real, 
+                    dta_paired_train$max_movement_fake, 
+                    paired = TRUE)
+cat("Max Movement:\n")
+cat(sprintf("  Real: %.3f\n", mean(dta_paired_train$max_movement_real, na.rm=T)))
+cat(sprintf("  Fake: %.3f\n", mean(dta_paired_train$max_movement_fake, na.rm=T)))
+cat(sprintf("  Diff: %.3f | p-value: %.4f %s\n\n", 
+            t_max_mov$estimate, t_max_mov$p.value,
+            ifelse(t_max_mov$p.value < 0.05, "*SIG*", "")))
+
+# 4. Test 95th Percentile Movement
+t_95_mov <- t.test(dta_paired_train$movement_95th_real, 
+                   dta_paired_train$movement_95th_fake, 
+                   paired = TRUE)
+cat("95th Percentile Movement:\n")
+cat(sprintf("  Real: %.3f\n", mean(dta_paired_train$movement_95th_real, na.rm=T)))
+cat(sprintf("  Fake: %.3f\n", mean(dta_paired_train$movement_95th_fake, na.rm=T)))
+cat(sprintf("  Diff: %.3f | p-value: %.4f %s\n\n", 
+            t_95_mov$estimate, t_95_mov$p.value,
+            ifelse(t_95_mov$p.value < 0.05, "*SIG*", "")))
+```
+
+Acceleration:
+
+-   Mean acceleration not significant. Suggests that the fakes are not
+    jittery or have sudden movement snaps.
+
+-   Max acceleration is also not significant.
+
+Max movement:
+
+-   Significantly lower in fakes compared to real videos.
+
+-   Fakes have less extreme movement peaks. When an huge emotional
+    expression is made in a real video, the fake fails to reach the full
+    intensity of the real movement.
+
+95th percentile movement:
+
+-   Significantly lower in fake compared to real again.
+
+-   Fakes cut off the top 5% of the expression intensity.
+
+Overall, these findings suggest that the faceswap autoencoder largely
+preserves the dynamics of facial expressions, but the big movements are
+muted. This gives a potential explanation for why the classifier works
+better on emotion videos. In neutral videos, the face isn't moving a
+lot, so there are no large peaks (max movement). In emotion videos,
+there are bigger facial movements. The faceswap process fails to reach
+the peak of these movements, and this difference is what the classifier
+is likely detecting.
+
+## Emotion
+
+```{r}
+# Get list of unique valences (usually Positive, Neutral, Negative)
+valences <- unique(dta_paired_train$valence_real)
+
+# Loop through each valence and run the tests
+for (v in valences) {
+  
+  # 1. Filter data for just this valence
+  dta_subset <- dta_paired_train %>% filter(valence_real == v)
+  
+  cat(paste0("\n=========================================\n"))
+  cat(paste0("   ANALYSIS FOR VALENCE: ", toupper(v), "\n"))
+  cat(paste0("   (n = ", nrow(dta_subset), " pairs)\n"))
+  cat(paste0("=========================================\n"))
+
+  # --- TEST 1: Mean Movement ---
+  if(nrow(dta_subset) > 2) {
+    t_mean <- t.test(dta_subset$mean_movement_real, 
+                     dta_subset$mean_movement_fake, 
+                     paired = TRUE)
+    
+    cat("\n1. Mean Movement:\n")
+    cat(sprintf("   Real: %.3f (SD: %.3f)\n", mean(dta_subset$mean_movement_real, na.rm=T), sd(dta_subset$mean_movement_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f (SD: %.3f)\n", mean(dta_subset$mean_movement_fake, na.rm=T), sd(dta_subset$mean_movement_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_mean$estimate, t_mean$p.value, 
+                ifelse(t_mean$p.value < 0.05, "*SIG*", "")))
+  }
+
+  # --- TEST 2: Movement Variability (CV) ---
+  if(nrow(dta_subset) > 2) {
+    t_cv <- t.test(dta_subset$movement_cv_real, 
+                   dta_subset$movement_cv_fake, 
+                   paired = TRUE)
+    
+    cat("\n2. Movement Variability (CV):\n")
+    cat(sprintf("   Real: %.3f (SD: %.3f)\n", mean(dta_subset$movement_cv_real, na.rm=T), sd(dta_subset$movement_cv_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f (SD: %.3f)\n", mean(dta_subset$movement_cv_fake, na.rm=T), sd(dta_subset$movement_cv_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_cv$estimate, t_cv$p.value, 
+                ifelse(t_cv$p.value < 0.05, "*SIG*", "")))
+  }
+
+  # --- TEST 3: Peak Frequency ---
+  if(nrow(dta_subset) > 2) {
+    t_peak <- t.test(dta_subset$peak_freq_real, 
+                     dta_subset$peak_freq_fake, 
+                     paired = TRUE)
+    
+    cat("\n3. Peak Frequency:\n")
+    cat(sprintf("   Real: %.3f\n", mean(dta_subset$peak_freq_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f\n", mean(dta_subset$peak_freq_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_peak$estimate, t_peak$p.value, 
+                ifelse(t_peak$p.value < 0.05, "*SIG*", "")))
+  }
+  
+  # --- TEST 4: Smoothness ---
+  if(nrow(dta_subset) > 2) {
+    valid_smooth <- dta_subset %>% filter(!is.na(movement_smoothness_real) & !is.na(movement_smoothness_fake))
+    
+    if(nrow(valid_smooth) > 2) {
+      t_smooth <- t.test(valid_smooth$movement_smoothness_real, 
+                         valid_smooth$movement_smoothness_fake, 
+                         paired = TRUE)
+      
+      cat("\n4. Movement Smoothness:\n")
+      cat(sprintf("   Real: %.3f\n", mean(valid_smooth$movement_smoothness_real)))
+      cat(sprintf("   Fake: %.3f\n", mean(valid_smooth$movement_smoothness_fake)))
+      cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                  t_smooth$estimate, t_smooth$p.value, 
+                  ifelse(t_smooth$p.value < 0.05, "*SIG*", "")))
+    } else {
+      cat("\n4. Movement Smoothness: Not enough valid data points.\n")
+    }
+  }
+
+  # --- TEST 5: Mean Acceleration ---
+  if(nrow(dta_subset) > 2) {
+    t_mean_acc <- t.test(dta_subset$mean_acceleration_real, 
+                         dta_subset$mean_acceleration_fake, 
+                         paired = TRUE)
+    
+    cat("\n5. Mean Acceleration:\n")
+    cat(sprintf("   Real: %.3f\n", mean(dta_subset$mean_acceleration_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f\n", mean(dta_subset$mean_acceleration_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_mean_acc$estimate, t_mean_acc$p.value,
+                ifelse(t_mean_acc$p.value < 0.05, "*SIG*", "")))
+  }
+
+  # --- TEST 6: Max Acceleration ---
+  if(nrow(dta_subset) > 2) {
+    t_max_acc <- t.test(dta_subset$max_acceleration_real, 
+                        dta_subset$max_acceleration_fake, 
+                        paired = TRUE)
+    
+    cat("\n6. Max Acceleration:\n")
+    cat(sprintf("   Real: %.3f\n", mean(dta_subset$max_acceleration_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f\n", mean(dta_subset$max_acceleration_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_max_acc$estimate, t_max_acc$p.value,
+                ifelse(t_max_acc$p.value < 0.05, "*SIG*", "")))
+  }
+
+  # --- TEST 7: Max Movement ---
+  if(nrow(dta_subset) > 2) {
+    t_max_mov <- t.test(dta_subset$max_movement_real, 
+                        dta_subset$max_movement_fake, 
+                        paired = TRUE)
+    
+    cat("\n7. Max Movement:\n")
+    cat(sprintf("   Real: %.3f\n", mean(dta_subset$max_movement_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f\n", mean(dta_subset$max_movement_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_max_mov$estimate, t_max_mov$p.value,
+                ifelse(t_max_mov$p.value < 0.05, "*SIG*", "")))
+  }
+
+  # --- TEST 8: 95th Percentile ---
+  if(nrow(dta_subset) > 2) {
+    t_95 <- t.test(dta_subset$movement_95th_real, 
+                   dta_subset$movement_95th_fake, 
+                   paired = TRUE)
+    
+    cat("\n8. 95th Percentile Movement:\n")
+    cat(sprintf("   Real: %.3f\n", mean(dta_subset$movement_95th_real, na.rm=T)))
+    cat(sprintf("   Fake: %.3f\n", mean(dta_subset$movement_95th_fake, na.rm=T)))
+    cat(sprintf("   Diff: %.3f | p-value: %.4f %s\n", 
+                t_95$estimate, t_95$p.value,
+                ifelse(t_95$p.value < 0.05, "*SIG*", "")))
+  }
+
+  cat("\n\n")
+}
+```
+
+Neutral:
+
+-   Fakes are significantly smoother (movement smoothness) and have
+    significantly lower variability (CV) than real.
+
+-   A real face has small movements that the faceswap process smooths
+    out. The face becomes too perfect and unnaturally stable.
+
+-   Real videos have significantly higher peak movements (max movements)
+    than fakes.
+
+-   Mean movement had no significant difference, suggesting the volume
+    of movement is the same but the quality (complexity) is lost.
+
+-   The faceswap autoencoder acts as a low-pass filter by removing
+    subtle biological signals.
+
+Negative:
+
+-   Fakes fail a lot here with significant differences for all tests.
+
+-   Real faces move more (mean movement), have more average acceleration
+    (mean acceleration), snap/twitch much faster (max acceleration), and
+    have deform much further (max movement).
+
+-   The faceswap autoencoder essentially creates a lazy version of the
+    negative expression because it cannot accurately preserve. Negative
+    expressions are known to be very subtle and nuanced, and since we
+    know already that the fake process is smoothing out a lot of subtle
+    signal, we can see it do the same here.
+
+Positive:
+
+-   Positive expressions typically involve large deformations/movements,
+    but unlike negative emotions, the faceswap process seems to add
+    energy rather than remove it.
+
+-   Fakes have significantly higher mean movement and mean acceleration
+    than real videos.
+
+-   This could be due to positive expressions having more jitter in
+    fakes, where the textures jitter or vibrate when the faceswap
+    process struggles to latch onto the facial landmarks due to their
+    extreme movements.
+
+Overall, we know that the faceswap process smooths out subtle movements
+in facial expressions. There is a loss of dynamic range in facial
+movements in fake compared to real videos, which is likely what the
+classifier picks up on to detect fakes.
+
+# Mixed Effect Model
+
+The paired t-tests so far have investigated whether there is a
+difference between real and fake movement, but a mixed effect model will
+tell us whether the difference depends on emotion, while controlling for
+video pairs (some actors may be more naturally expressive than others).
+
+The model below tests whether the real/fake difference in movement
+metrics depend on emotional valence, while accounting for the paired
+structure of the data.
+
+```{r}
+library(lme4)
+library(lmerTest)
+
+cat("\n=== MIXED EFFECTS MODEL: Movement Variability (CV) ===\n\n")
+
+# Change baseline reference to neutral
+dta_video_movement_train$valence <- relevel(factor(dta_video_movement_train$valence), ref = "neutral")
+
+model_cv <- lmer(movement_cv ~ isfakeorreal * valence + (1| pair_id),
+                 data = dta_video_movement_train)
+
+summary(model_cv)
+
+# Type III ANOVA table (tests each fixed effect)
+cat("\nANOVA Table:\n")
+anova(model_cv)
+
+
+cat("\n=== MIXED EFFECTS MODEL: Max Movement ===\n\n")
+
+model_max <- lmer(max_movement ~ isfakeorreal * valence + (1 | pair_id),
+                  data = dta_video_movement_train)
+
+summary(model_max)
+anova(model_max)
+
+
+cat("\n=== MIXED EFFECTS MODEL: 95th Percentile Movement ===\n\n")
+
+model_95th <- lmer(movement_95th ~ isfakeorreal * valence + (1 | pair_id),
+                   data = dta_video_movement_train)
+
+summary(model_95th)
+anova(model_95th)
+
+
+cat("\n=== MIXED EFFECTS MODEL: Mean Movement ===\n\n")
+
+model_mean <- lmer(mean_movement ~ isfakeorreal * valence + (1 | pair_id),
+                   data = dta_video_movement_train)
+
+summary(model_mean)
+anova(model_mean)
+```
+
+Movement Variability (CV):
+
+-   Intercept represents fake neutral videos (CV = 0.625).
+
+-   Real videos have significantly higher CV overall (+0.057, p =
+    0.001), confirming fakes are unnaturally consistent.
+
+-   Interaction with positive valence is borderline although not
+    significant (p = 0.07). The real/fake gap in CV is smaller for
+    positive emotions than for neutral.
+
+-   Negative emotions show no significant interaction (real/fake gap is
+    similar to neutral).
+
+Max movement:
+
+-   Real videos have higher max movement overall (+0.445, p = 0.048).
+
+-   Positive interaction is borderline significant and negative (-0.628,
+    p = 0.053), meaning the real/fake gap in peak movement is reduced
+    (or even reversed) for positive expressions.
+
+-   This aligns with the earlier finding that fakes seem to
+    overcompensate during positive expressions.
+
+95th percentile movement:
+
+-   Similar pattern to max movement. Real videos trend higher (+0.195, p
+    = 0.069) but not significant.
+
+-   Positive interaction is again negative (-0.263, p = 0.088) but not
+    significant.
+
+-   Overall interaction is highly significant (p = 0.007), driven by the
+    divergent patterns across emotions.
+
+Mean movement:
+
+-   Main effect is non-significant (p = 0.208), meaning that on average
+    real and fake videos have the same amount of movement.
+
+-   But, interaction is highly significant (p = 0.002). Specifically,
+    the real:positive coefficient is -0.098 (p = 0.015), suggesting that
+    for positive emotions, fakes actually have more mean movement than
+    real videos. This is the overcompensation effect seen earlier.
+
+Overall, the faceswap autoencoder appears to be performing some kind of
+movement intensity compression towards the mean. For neutral videos, the
+fakes lose subtle micro-movements (lower CV, smoother), but mean
+movement is preserved. For negative videos, fakes underperform - real
+faces reach higher peaks and have more variability but in fakes, the
+autoencoder cannot capture the nuanced and subtle expressions). For
+positive videos, fakes overcompensate - they add movement/jitter,
+possibly because the extreme deformations of positive expressions
+compared to neutral/negative (wide smiles, raised brows, jaw drop) cause
+the autoencoder to struggle with texture stability.
+
+The classifier likely detects fakes better in emotion videos not because
+they have more movement, but because fakes compress the dynamic range in
+opposite directions depending on valence - they are too flat for
+negative emotions, and too noisy for positive ones.
+
+# Post-Hoc Contrasts
+
+The interaction terms from the mixed effects model tell us that patterns
+differ, but not the exact pairwise comparisons. This section will find
+the estimated real/fake difference at each valence level.
+
+```{r}
+library(emmeans)
+
+# For each model, extract the real-fake contrast at each valence
+
+??emmeans
+emm_cv <- emmeans(model_cv, pairwise ~ valence | isfakeorreal, adjust = "bonf")
+emm_max <- emmeans(model_max, pairwise ~ valence | isfakeorreal, adjust = "bonf")
+emm_95th <- emmeans(model_95th, pairwise ~ valence | isfakeorreal, adjust = "bonf")
+emm_mean <- emmeans(model_mean, pairwise ~ valence | isfakeorreal, adjust = "bonf")
+
+cat("\n=== POST-HOC: Movement Variability (CV) ===\n")
+summary(emm_cv$contrasts)
+
+cat("\n=== POST-HOC: Max Movement ===\n")
+summary(emm_max$contrasts)
+
+cat("\n=== POST-HOC: 95th Percentile Movement ===\n")
+summary(emm_95th$contrasts)
+
+cat("\n=== POST-HOC: Mean Movement ===\n")
+summary(emm_mean$contrasts)
+```
+
+## Get Effect Sizes
+
+This gets the standardised effect sizes (Cohens D) for the real/fake
+difference at each valence.
+
+```{r}
+
+fn_get_cohens_d <- function(model, emm_contrasts) {
+  residual_sd <- sigma(model)
+  contrasts_df <- as.data.frame(summary(emm_contrasts))
+  contrasts_df$cohens_d <- contrasts_df$estimate / residual_sd
+  return(contrasts_df[, c("valence", "estimate", "SE", "p.value", "cohens_d")])
+}
+
+cat("\n=== EFFECT SIZES (Cohen's d) ===\n")
+cat("\nMovement CV:\n")
+print(fn_get_cohens_d(model_cv, emm_cv$contrasts))
+
+cat("\nMax Movement:\n")
+print(fn_get_cohens_d(model_max, emm_max$contrasts))
+```
+
+Negative:
+
+-   Across all 4 metrics, negative emotional expressions show the
+    largest and most significant real/fake gaps.
+
+-   CV: d = -0.90 (large effect), p = 0.0002
+
+-   Max movement: d = -0.71 (medium-large), p = 0.003
+
+-   95th percentile: p = 0.0008
+
+-   Mean movement: p = 0.012
+
+-   Real negative faces have more variability, higher peaks, and more
+    overall movement than fakes. The autoencoder essentially is creating
+    a dampened version of negative expressions, where it cannot
+    reproduce the subtleties of negative expressions.
+
+Neutral:
+
+-   Significant differences for CV (d = -0.54, p = 0.001) and max
+    movement (d = -0.32, p = 0.048), with 95th percentile movement
+    borderline (p = 0.069).
+
+-   Mean movement shows no difference (p = 0.208).
+
+-   This suggests fakes preserve the amount of movement but lose the
+    intensity of the movement (the micro-movements and dynamic
+    variability). This confirms earlier findings.
+
+Positive:
+
+-   No significant differences in CV, max movement, or 95th percentile.
+
+-   mean movement is significantly higher in fakes (+0.063, p = 0.031).
+
+-   The autoencoder isn't failing to reach the peaks - it is actually
+    adding movement (likely jitter or instability).
+
+```{r}
+# Residual plots for key model
+par(mfrow = c(2, 2))
+plot(model_cv, main = "CV Model Diagnostics")
+
+# QQ plot
+qqnorm(resid(model_cv))
+qqline(resid(model_cv))
+```
+
+# ICC
+
+The intra-class correlation (ICC) to show how much variance is explained
+by the pairing structure (how much of the variance is down to which
+pair/actor it is).
+
+```{r}
+# ICC = variance_pair / (variance_pair + variance_residual)
+calc_icc <- function(model) {
+  vc <- as.data.frame(VarCorr(model))
+  icc <- vc$vcov[1] / sum(vc$vcov)
+  return(icc)
+}
+
+cat("\n=== INTRA-CLASS CORRELATIONS ===\n")
+cat(sprintf("CV Model ICC: %.3f\n", calc_icc(model_cv)))
+cat(sprintf("Max Movement ICC: %.3f\n", calc_icc(model_max)))
+cat(sprintf("95th Percentile ICC: %.3f\n", calc_icc(model_95th)))
+cat(sprintf("Mean Movement ICC: %.3f\n", calc_icc(model_mean)))
+```
+
+-   Mean movement ICC = 0.84
+
+    -   84% of variance in mean movement is explained by video pair
+        identity.
+
+    -   Some actors move more than others, and this is strongly
+        preserved across pairs.
+
+    -   Who the actor/pair is almost completely determines the average
+        amount of movement.
+
+-   CV ICC = 0.58
+
+    -   Moderate clustering. Individual expressiveness matters but there
+        is also substantial within-pair variation that affects CV.
+
+-   Max / 95th ICC = \~0.5
+
+    -   About half the variance is pair-level, the other half is
+        real-fake/emotion driven.
+
+Overall, the autoencoder appears to work like a selective compression
+filter, where it preserves gross movement quantity (mean movement) but
+compresses the dynamic range of the movement. This compression effect is
+asymmetric by valence - negative emotions are compressed towards
+flatness, whereas positive emotions are compressed towards the mean but
+with added noise (overcompensation).
+
+# Figures
+
+```{r}
+library(ggplot2)
+library(emmeans)
+library(patchwork)
+
+# Define consistent colors
+colors_auth <- c("real" = "#2E86AB", "fake" = "#E94F37")
+
+
+# ============================================
+# FIGURE 1: Interaction Plot (Estimated Marginal Means)
+# Shows the real-fake gap at each valence level
+# ============================================
+
+# Extract emmeans for plotting
+emm_cv_plot <- as.data.frame(emmeans(model_cv, ~ isfakeorreal * valence))
+emm_max_plot <- as.data.frame(emmeans(model_max, ~ isfakeorreal * valence))
+emm_mean_plot <- as.data.frame(emmeans(model_mean, ~ isfakeorreal * valence))
+emm_95th_plot <- as.data.frame(emmeans(model_95th, ~ isfakeorreal * valence))
+
+# Add metric labels
+emm_cv_plot$metric <- "Movement Variability (CV)"
+emm_max_plot$metric <- "Max Movement"
+emm_mean_plot$metric <- "Mean Movement"
+emm_95th_plot$metric <- "95th Percentile Movement"
+
+# Combine all
+emm_all <- bind_rows(emm_cv_plot, emm_max_plot, emm_mean_plot, emm_95th_plot)
+
+# Reorder valence for logical display
+emm_all$valence <- factor(emm_all$valence, levels = c("negative", "neutral", "positive"))
+
+# Rename authenticity for cleaner legend
+emm_all$Authenticity <- factor(emm_all$isfakeorreal, 
+                                levels = c("fake", "real"),
+                                labels = c("Fake", "Real"))
+
+# Create the interaction plot
+fig_interaction <- ggplot(emm_all, aes(x = valence, y = emmean, 
+                                        color = Authenticity, group = Authenticity)) +
+  geom_line(linewidth = 0.8, position = position_dodge(0.1)) +
+  geom_point(size = 3, position = position_dodge(0.1)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), 
+                width = 0.15, linewidth = 0.6, 
+                position = position_dodge(0.1)) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = colors_auth) +
+  scale_x_discrete(labels = c("Negative", "Neutral", "Positive")) +
+  labs(
+    x = "Emotional Valence",
+    y = "Estimated Marginal Mean",
+    title = "Real-Fake Movement Differences Depend on Emotional Content"
+  ) +
+  theme_classic()
+
+print(fig_interaction)
+
+
+# ============================================
+# FIGURE 2: Contrast Plot (Real - Fake Difference)
+# Shows the magnitude and direction of the real-fake gap
+# ============================================
+
+# Extract contrasts
+contrast_cv <- as.data.frame(summary(emm_cv$contrasts))
+contrast_max <- as.data.frame(summary(emm_max$contrasts))
+contrast_mean <- as.data.frame(summary(emm_mean$contrasts))
+contrast_95th <- as.data.frame(summary(emm_95th$contrasts))
+
+contrast_cv$metric <- "Movement Variability (CV)"
+contrast_max$metric <- "Max Movement"
+contrast_mean$metric <- "Mean Movement"
+contrast_95th$metric <- "95th Percentile Movement"
+
+contrasts_all <- bind_rows(contrast_cv, contrast_max, contrast_mean, contrast_95th)
+
+# Clean up valence labels
+contrasts_all$valence <- factor(contrasts_all$valence, 
+                                 levels = c("negative", "neutral", "positive"),
+                                 labels = c("Negative", "Neutral", "Positive"))
+
+# Add significance stars
+contrasts_all$sig <- case_when(
+  contrasts_all$p.value < 0.001 ~ "***",
+  contrasts_all$p.value < 0.01 ~ "**",
+  contrasts_all$p.value < 0.05 ~ "*",
+  contrasts_all$p.value < 0.1 ~ "†",
+  TRUE ~ ""
+)
+
+# Calculate confidence intervals (estimate ± 1.96*SE for 95% CI)
+contrasts_all$lower <- contrasts_all$estimate - 1.96 * contrasts_all$SE
+contrasts_all$upper <- contrasts_all$estimate + 1.96 * contrasts_all$SE
+
+# Create contrast plot
+fig_contrasts <- ggplot(contrasts_all, aes(x = valence, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  geom_point(size = 3, color = "#2E86AB") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), 
+                width = 0.2, linewidth = 0.6, color = "#2E86AB") +
+  geom_text(aes(label = sig, y = upper + 0.05 * max(abs(c(lower, upper)))), 
+            size = 4, vjust = 0) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  labs(
+    x = "Emotional Valence",
+    y = "Real − Fake Difference (EMM)",
+    title = "Magnitude of Real-Fake Gap by Emotion",
+    subtitle = "Positive values indicate Real > Fake; † p < .10, * p < .05, ** p < .01, *** p < .001"
+  ) +
+  theme_classic() +
+  theme(plot.subtitle = element_text(size = 9, color = "gray40"))
+
+print(fig_contrasts)
+
+
+# ============================================
+# FIGURE 3 (Optional): Raw Data with Model Overlay
+# Shows individual data points with model estimates
+# ============================================
+
+# Prepare raw data
+dta_video_movement_train$valence <- factor(dta_video_movement_train$valence, 
+                                            levels = c("negative", "neutral", "positive"))
+dta_video_movement_train$Authenticity <- factor(dta_video_movement_train$isfakeorreal,
+                                                 levels = c("fake", "real"),
+                                                 labels = c("Fake", "Real"))
+
+fig_raw_cv <- ggplot(dta_video_movement_train, 
+                      aes(x = valence, y = movement_cv, color = Authenticity)) +
+  geom_point(alpha = 0.3, position = position_jitterdodge(jitter.width = 0.15, 
+                                                           dodge.width = 0.4),
+             size = 1.5) +
+  geom_point(data = emm_cv_plot %>% 
+               mutate(valence = factor(valence, levels = c("negative", "neutral", "positive")),
+                      Authenticity = factor(isfakeorreal, levels = c("fake", "real"), 
+                                            labels = c("Fake", "Real"))),
+             aes(y = emmean), 
+             size = 4, position = position_dodge(0.4)) +
+  geom_errorbar(data = emm_cv_plot %>% 
+                  mutate(valence = factor(valence, levels = c("negative", "neutral", "positive")),
+                         Authenticity = factor(isfakeorreal, levels = c("fake", "real"), 
+                                               labels = c("Fake", "Real"))),
+                aes(y = emmean, ymin = lower.CL, ymax = upper.CL),
+                width = 0.15, linewidth = 0.8, position = position_dodge(0.4)) +
+  scale_color_manual(values = colors_auth) +
+  scale_x_discrete(labels = c("Negative", "Neutral", "Positive")) +
+  labs(
+    x = "Emotional Valence",
+    y = "Movement Variability (CV)",
+    title = "Movement Variability by Authenticity and Emotion"
+  ) +
+  theme_classic()
+
+print(fig_raw_cv)
+
+```
+
+Paired t-test figure:
+
+```{r}
+# ============================================
+# FIGURE: Paired T-Test Results Summary
+# Shows real vs fake means with significance for each metric × valence
+# ============================================
+
+# First, calculate summary statistics from your paired data
+# We need means and SEs for real and fake at each valence level
+
+# Create a function to summarize one metric
+summarize_metric <- function(data, metric_name, real_col, fake_col) {
+  data %>%
+    group_by(valence_real) %>%
+    summarise(
+      real_mean = mean(.data[[real_col]], na.rm = TRUE),
+      real_se = sd(.data[[real_col]], na.rm = TRUE) / sqrt(n()),
+      fake_mean = mean(.data[[fake_col]], na.rm = TRUE),
+      fake_se = sd(.data[[fake_col]], na.rm = TRUE) / sqrt(n()),
+      n = n(),
+      .groups = 'drop'
+    ) %>%
+    mutate(metric = metric_name) %>%
+    rename(valence = valence_real)
+}
+
+# Summarize each metric
+summary_cv <- summarize_metric(dta_paired_train, "Movement Variability (CV)", 
+                                "movement_cv_real", "movement_cv_fake")
+summary_max <- summarize_metric(dta_paired_train, "Max Movement", 
+                                 "max_movement_real", "max_movement_fake")
+summary_95th <- summarize_metric(dta_paired_train, "95th Percentile Movement", 
+                                  "movement_95th_real", "movement_95th_fake")
+summary_mean <- summarize_metric(dta_paired_train, "Mean Movement", 
+                                  "mean_movement_real", "mean_movement_fake")
+
+# Combine all summaries
+summary_all <- bind_rows(summary_cv, summary_max, summary_95th, summary_mean)
+
+# Pivot to long format for plotting
+summary_long <- summary_all %>%
+  pivot_longer(
+    cols = c(real_mean, fake_mean),
+    names_to = "authenticity",
+    values_to = "mean"
+  ) %>%
+  mutate(
+    se = ifelse(authenticity == "real_mean", real_se, fake_se),
+    authenticity = ifelse(authenticity == "real_mean", "Real", "Fake")
+  ) %>%
+  select(valence, metric, authenticity, mean, se, n)
+
+# Order factors
+summary_long$valence <- factor(summary_long$valence, 
+                                levels = c("negative", "neutral", "positive"),
+                                labels = c("Negative", "Neutral", "Positive"))
+summary_long$authenticity <- factor(summary_long$authenticity, 
+                                     levels = c("Fake", "Real"))
+summary_long$metric <- factor(summary_long$metric,
+                               levels = c("Movement Variability (CV)", 
+                                          "Mean Movement",
+                                          "Max Movement", 
+                                          "95th Percentile Movement"))
+
+# Add significance annotations from post-hoc results
+sig_annotations <- data.frame(
+  metric = factor(c(
+    # CV
+    "Movement Variability (CV)", "Movement Variability (CV)", "Movement Variability (CV)",
+    # Mean Movement
+    "Mean Movement", "Mean Movement", "Mean Movement",
+    # Max Movement
+    "Max Movement", "Max Movement", "Max Movement",
+    # 95th Percentile
+    "95th Percentile Movement", "95th Percentile Movement", "95th Percentile Movement"
+  ), levels = c("Movement Variability (CV)", "Mean Movement", 
+                "Max Movement", "95th Percentile Movement")),
+  valence = factor(rep(c("Negative", "Neutral", "Positive"), 4),
+                    levels = c("Negative", "Neutral", "Positive")),
+  p_value = c(
+    # CV
+    0.0002, 0.001, 0.485,
+    # Mean Movement
+    0.012, 0.208, 0.031,
+    # Max Movement
+    0.003, 0.048, 0.430,
+    # 95th Percentile
+    0.0008, 0.069, 0.537
+  )
+)
+
+sig_annotations <- sig_annotations %>%
+  mutate(
+    sig_label = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      p_value < 0.1 ~ "†",
+      TRUE ~ "ns"
+    )
+  )
+
+# Calculate y positions for significance bars
+y_positions <- summary_long %>%
+  group_by(metric, valence) %>%
+  summarise(y_max = max(mean + se), .groups = 'drop') %>%
+  left_join(sig_annotations, by = c("metric", "valence"))
+
+# Define colors
+colors_auth <- c("Real" = "#2E86AB", "Fake" = "#E94F37")
+
+# Create the plot
+fig_paired_ttest <- ggplot(summary_long, 
+                            aes(x = valence, y = mean, fill = authenticity)) +
+  geom_bar(stat = "identity", position = position_dodge(0.8), 
+           width = 0.7, color = "black", linewidth = 0.3) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
+                position = position_dodge(0.8), width = 0.2, linewidth = 0.4) +
+  geom_text(data = y_positions,
+            aes(x = valence, y = y_max * 1.08, label = sig_label, fill = NULL),
+            size = 4, vjust = 0) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = colors_auth, name = "Authenticity") +
+  labs(
+    x = "Emotional Valence",
+    y = "Mean ± SE",
+    title = "Facial Movement Metrics by Authenticity and Emotional Valence",
+    caption = "† p < .10, * p < .05, ** p < .01, *** p < .001 (paired t-tests)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 11),
+    strip.background = element_rect(fill = "gray95", color = NA),
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0),
+    axis.title = element_text(size = 11),
+    panel.spacing = unit(1, "lines")
+  )
+
+print(fig_paired_ttest)
+
+
+# ============================================
+# ALTERNATIVE: Difference Plot (Real - Fake)
+# Shows the contrast directly with CIs
+# ============================================
+
+# Create contrast data from post-hoc results
+contrast_data <- data.frame(
+  metric = factor(c(
+    rep("Movement Variability (CV)", 3),
+    rep("Mean Movement", 3),
+    rep("Max Movement", 3),
+    rep("95th Percentile Movement", 3)
+  ), levels = c("Movement Variability (CV)", "Mean Movement", 
+                "Max Movement", "95th Percentile Movement")),
+  valence = factor(rep(c("Negative", "Neutral", "Positive"), 4),
+                    levels = c("Negative", "Neutral", "Positive")),
+  # Note: contrasts were fake - real, so we flip signs for real - fake
+  estimate = -c(
+    # CV
+    -0.0946, -0.0568, -0.0123,
+    # Mean Movement
+    -0.1038, -0.0353, 0.0631,
+    # Max Movement
+    -0.9917, -0.4449, 0.1831,
+    # 95th Percentile
+    -0.5334, -0.1950, 0.0683
+  ),
+  se = c(
+    # CV
+    0.0248, 0.0170, 0.0176,
+    # Mean Movement
+    0.0409, 0.0280, 0.0289,
+    # Max Movement
+    0.3274, 0.2238, 0.2315,
+    # 95th Percentile
+    0.156, 0.107, 0.110
+  ),
+  p_value = c(
+    # CV
+    0.0002, 0.001, 0.485,
+    # Mean Movement
+    0.012, 0.208, 0.031,
+    # Max Movement
+    0.003, 0.048, 0.430,
+    # 95th Percentile
+    0.0008, 0.069, 0.537
+  )
+)
+
+contrast_data <- contrast_data %>%
+  mutate(
+    lower = estimate - 1.96 * se,
+    upper = estimate + 1.96 * se,
+    sig_label = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      p_value < 0.1 ~ "†",
+      TRUE ~ ""
+    ),
+    # Color by direction
+    direction = ifelse(estimate > 0, "Real > Fake", "Fake > Real")
+  )
+
+fig_contrasts <- ggplot(contrast_data, aes(x = valence, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  geom_point(aes(color = direction), size = 3.5) +
+  geom_errorbar(aes(ymin = lower, ymax = upper, color = direction), 
+                width = 0.15, linewidth = 0.7) +
+  geom_text(aes(label = sig_label, y = upper + 0.08 * max(abs(c(lower, upper)))),
+            size = 4.5, fontface = "bold") +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("Real > Fake" = "#2E86AB", "Fake > Real" = "#E94F37"),
+                     name = "Direction") +
+  labs(
+    x = "Emotional Valence",
+    y = "Real − Fake Difference",
+    title = "Direction and Magnitude of Real-Fake Movement Differences",
+    caption = "Points show mean difference ± 95% CI. † p < .10, * p < .05, ** p < .01, *** p < .001"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 11),
+    strip.background = element_rect(fill = "gray95", color = NA),
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.caption = element_text(size = 9, color = "gray40", hjust = 0),
+    axis.title = element_text(size = 11),
+    panel.spacing = unit(1, "lines")
+  )
+
+print(fig_contrasts)
+
+```

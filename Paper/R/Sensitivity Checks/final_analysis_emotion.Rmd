@@ -1,0 +1,1521 @@
+---
+title: "final_analysis_emotion"
+output:
+  pdf_document: default
+---
+
+# Introduction
+
+This Rmd will be the same as `final_analysis.Rmd` but will just use videos with emotion. Previous model performance indicated that there are differences between videos with emotion and no emotion. By splitting the problem into emotion vs. no emotion, this should reduce complexity.
+
+# Load Libraries & Data
+
+```{r}
+library(tidyverse)
+library(dplyr)
+
+# Load data
+dta_nmf_input <- read.csv("dta_nmf_input.csv")
+```
+
+Split into separate datasets by emotion:
+
+```{r}
+# Function to add emotion column
+add_emotion_column <- function(df) {
+  df %>%
+    mutate(
+      emotion = case_when(
+        str_detect(video_filename, "_laughing") ~ "yes",
+        str_detect(video_filename, "_happy") ~ "yes",
+        str_detect(video_filename, "_serious") ~ "yes",
+        str_detect(video_filename, "_angry") ~ "yes",
+        str_detect(video_filename, "_disgusted") ~ "yes",
+        TRUE ~ "no"
+      ),
+      emotion = factor(emotion, levels = c("yes", "no"))
+    )
+}
+
+
+dta_nmf_input <- add_emotion_column(dta_nmf_input)
+# Reorder columns
+dta_nmf_input <- dta_nmf_input %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, frame, everything())
+
+
+# Emotion only
+dta_nmf_input_emotion <- dta_nmf_input %>%
+  filter(emotion == "yes")
+
+# No Emotion only
+dta_nmf_input_no_emotion <- dta_nmf_input %>%
+  filter(emotion == "no")
+
+
+# Video counts
+print(length(unique(dta_nmf_input_emotion$video_filename)))
+print(length(unique(dta_nmf_input_no_emotion$video_filename)))
+```
+
+Emotion dataset: 280 videos
+
+No Emotion dataset: 184 videos
+
+Save datasets:
+
+```{r}
+write.csv(dta_nmf_input_emotion, "dta_nmf_input_emotion.csv", row.names = F)
+write.csv(dta_nmf_input_no_emotion, "dta_nmf_input_no_emotion.csv", row.names = F)
+```
+
+# Split 80/20
+
+```{r}
+set.seed(12345)
+
+real_videos <- dta_nmf_input_emotion %>%
+  filter(isfakeorreal == "real") %>%
+  distinct(video_filename)
+
+# Sample 80% of real videos for train set
+train_real_videos <- sample(real_videos$video_filename,
+                            size = floor(0.8 * nrow(real_videos)))
+
+# Get corresponding fake videos for selected real videos
+train_fake_videos <- dta_nmf_input_emotion %>%
+  filter(video_filename %in% train_real_videos) %>%
+  pull(corresponding_video) %>%
+  unique()
+
+# Train set
+dta_nmf_input_train <- dta_nmf_input_emotion %>%
+  filter(video_filename %in% c(train_real_videos, train_fake_videos))
+
+# Test set is everything else
+dta_nmf_input_test <- dta_nmf_input_emotion %>%
+  filter(!video_filename %in% c(train_real_videos, train_fake_videos))
+
+
+# Check distribution
+print(length(unique(dta_nmf_input_train$video_filename)))
+print(length(unique(dta_nmf_input_test$video_filename)))
+
+# Check pairs are preserved
+train_videos <- unique(dta_nmf_input_train$video_filename)
+test_videos <- unique(dta_nmf_input_test$video_filename)
+
+train_corresponding_videos <- dta_nmf_input_emotion %>%
+  filter(video_filename %in% train_videos) %>%
+  pull(corresponding_video) %>%
+  unique()
+
+if (length(intersect(train_corresponding_videos, test_videos)) == 0) {
+  cat("Success.\n")
+} else {
+  cat("Error, the following pairs were split:\n")
+  print(intersect(train_corresponding_videos, test_videos))
+}
+```
+
+Training set: 224 videos.
+
+Test set: 56 videos.
+
+# NMF
+
+## Optimal K
+
+```{r}
+# Installs required dependencies automatically and prevents update prompts
+#remotes::install_github("zdebruine/RcppML", dependencies = TRUE, upgrade = "never")
+set.seed(12345)
+
+ranks <- 2:10
+mse_values <- numeric(length(ranks))
+names(mse_values) <- ranks
+
+input_matrix <- as.matrix(t(dta_nmf_input_train[, 7:23]))
+
+for (i in 1:length(ranks)) {
+  k <- ranks[i]
+  cat("Running RcppML NMF for rank =", k, "\n")
+  res_rcppml <- tryCatch({
+    RcppML::nmf(input_matrix,
+                k = k,
+                verbose = FALSE,
+                tol = 1e-4,
+                maxit = 200)
+  }, error = function(e) {
+    cat("Error running RcppML NMF for rank", k, ":", conditionMessage(e), "\n")
+    return(NULL)
+  })
+  
+  if (!is.null(res_rcppml)) {
+    W <- res_rcppml$w
+    H <- res_rcppml$h
+    D <- res_rcppml$d
+    V_hat <- W %*% diag(D) %*% H  # reconstruction
+    
+    # Caclulate RSS
+    rss <- sum((input_matrix - V_hat)^2)
+    # Calculate MSE
+    mse_values[i] <- rss / (nrow(input_matrix) * ncol(input_matrix))
+    cat("Rank", k, "completed. MSE:", mse_values[i], "\n")
+    
+  } else {
+    mse_values[i] <- NA
+  }
+  rm(res_rcppml, W, H, V_hat); gc()
+}
+
+# Plot
+dta_rank_metrics_mse <- data.frame(
+  Rank = ranks,
+  MSE = mse_values
+)
+
+dta_rank_metrics_mse %>%
+  ggplot(aes(x = Rank, y = MSE)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue", size = 3) +
+  scale_x_continuous(breaks = dta_rank_metrics_mse$Rank) +
+  labs(title = "NMF Rank Estimation (RccpML): MSE vs Rank") +
+  theme_minimal()
+```
+
+## Run NMF
+
+```{r}
+model_nmf <- RcppML::nmf(input_matrix, 
+                         k = 3, 
+                         tol = 1e-6, 
+                         maxit = 750, 
+                         verbose = TRUE)
+
+
+# Extract H and scaling vector D
+H <- model_nmf$h
+D <- model_nmf$d
+
+# Scale H matrix using d scaling vector
+H_scaled <- sweep(H, 1, D, "*")
+
+# Transpose H matrix to get correct row order
+dta_h_matrix <- as.data.frame(t(H_scaled))
+
+# Change column names
+colnames(dta_h_matrix) <- paste0("nmf", 1:ncol(dta_h_matrix))
+
+# Check row order in h_df matches row order in metadata
+if(nrow(dta_h_matrix) != nrow(dta_nmf_input_train[, 2:5])) {
+  stop("Number of samples in H matrix does not match number of rows in the metadata.")
+}
+
+# Add h to dta_nmf_input
+dta_nmf_output <- dta_nmf_input_train %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, frame) %>%
+  bind_cols(dta_h_matrix)
+```
+
+## Visualisations
+
+```{r}
+# Function for min-max normalisation, used in visualisations
+fn_maxnormalise <- function(x, ...) {
+  rng <- range(x, na.rm = TRUE)
+  if (anyNA(rng) || diff(rng) == 0) {
+    return(rep(0, length(x)))  # safe fallback: all 0s
+  } else {
+    return((x - rng[1]) / diff(rng))
+  }
+}
+```
+
+```{r}
+library(RColorBrewer)
+
+au_names <- c("AU01_inner_brow_raiser", "AU02_outer_brow_raiser", "AU04_brow_lowerer",
+              "AU05_upper_lid_raiser", "AU06_cheek_raiser", "AU07_lid_tightener",
+              "AU09_nose_wrinkler", "AU10_upper_lip_raiser", "AU12_lip_corner_puller",
+              "AU14_dimpler", "AU15_lip_corner_depressor", "AU17_chin_raiser",
+              "AU20_lip_stretcher", "AU23_lip_tightener", "AU25_lips_part",
+              "AU26_jaw_drop", "AU45_blink")
+
+rownames(model_nmf$w) <- au_names
+
+
+# Basis matrix
+NMF::aheatmap(
+  model_nmf$w, 
+  main = "Basis Matrix (W)", 
+  color = colorRampPalette(brewer.pal(6, "Blues"))(100), 
+  Rowv = NA, Colv = NA
+)
+# Normalise across rows for comparison
+# Group by component for normalisation
+NMF::aheatmap(
+  apply(model_nmf$w, 2, fn_maxnormalise), 
+  main = "Basis Matrix (W) - Normalised", 
+  color = colorRampPalette(brewer.pal(6, "Blues"))(100), 
+  scale = "none", 
+  Rowv = NA, Colv = NA
+)
+
+apply(model_nmf$w, 2, fn_maxnormalise)
+
+# Applied fix to normalised basis matrix by changing 1 to 2 (before it was normalising by rows not columns)
+```
+
+High loading AUs:
+
+Component 1:
+
+-   AU06 - cheek raiser (1)
+
+-   AU07 - lid tightener (0.75864228)
+
+-   AU10 - upper lip raiser (0.90533776)
+
+-   AU12 - lip corner puller (0.99279814)
+
+-   AU14 - dimpler (0.87149821)
+
+Component 2:
+
+-   AU04 - brow lowerer (0.752474531)
+
+-   AU07 - lid tightener (0.594085123)
+
+-   AU15 - lip corner depressor (0.561341988)
+
+-   AU 17 - chin raiser (1)
+
+-   AU23 - lip tightener (0.513841587)
+
+Component 3:
+
+-   AU01 - inner brow raiser (1)
+
+-   AU02 - outer brow raiser (0.8697229)
+
+-   AU05 - upper lid raiser (0.6727540)
+
+-   AU25 - lips part (0.5623135)
+
+-   AU26 - jaw drop (0.5614809)
+
+-   AU45 - blink (0.5261286)
+
+```{r}
+dta_nmf_output %>%
+  pivot_longer(
+    cols = starts_with("nmf"),
+    names_to = "Component",
+    values_to = "Activation"
+  ) %>%
+  group_by(video_filename, Component) %>%
+  mutate(Activation = fn_maxnormalise(Activation)) %>%
+  ungroup() %>%
+  # Average across videos for each frame & component
+  group_by(isfakeorreal, Component, frame) %>%
+  summarise(Activation = mean(Activation, na.rm=TRUE)) %>%
+  # Normalise again by component
+  group_by(Component)%>%
+  mutate(Activation = fn_maxnormalise(Activation))%>%
+  ungroup() %>%
+  # Plot heatmap
+  ggplot( aes(x = frame, y = Component, fill = Activation)) +
+  geom_tile() +
+  facet_wrap(~ isfakeorreal, ncol = 2) +
+  scale_fill_gradientn(colours = viridis::magma(100)) +
+  labs(
+    title = "Heatmap of Averaged NMF Component Activations (Emotion Only Videos)",
+    x = "Frame",
+    y = "NMF Component",
+    fill = "Activation"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 14))
+```
+
+```{r}
+# Real vs. fake
+dta_nmf_output %>%
+  pivot_longer(
+    cols = starts_with("nmf"),
+    names_to = "Component",
+    values_to = "Activation"
+  ) %>%
+  # Normalise within each video and component
+  group_by(video_filename, Component) %>%
+  mutate(Activation = fn_maxnormalise(Activation)) %>%
+  ungroup() %>%
+  # Average across videos (by component and frame)
+  group_by(isfakeorreal, Component, frame) %>%
+  summarise(Activation = mean(Activation, na.rm = TRUE)) %>%
+  # Normalise averaged values within each component
+  group_by(Component) %>%
+  mutate(Activation = fn_maxnormalise(Activation)) %>%
+  ungroup() %>%
+  # Plot
+  ggplot(aes(x = frame, y = Activation, colour = Component)) +
+  geom_smooth() +
+  facet_wrap(~ isfakeorreal, ncol = 1) +
+  labs(
+    title = "NMF Components Over Time For Emotion Only Videos (Real vs. Fake)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 14)  # Increase font size for facet labels
+  )
+```
+
+# CMFTS
+
+## Install CMFTS Package
+
+```{r}
+# Install dependencies
+#devtools::install_github("cbergmeir/tsExpKit")
+
+# Install CMFTS package (uncomment if first run)
+#devtools::install_github("fjbaldan/CMFTS")
+```
+
+## Perform CMFTS Feature Extraction
+
+```{r}
+dta_cmfts_input <- dta_nmf_output %>%
+  select(video_filename, isfakeorreal, emotion, frame, nmf1, nmf2, nmf3) %>%
+  pivot_longer(cols = c("nmf1", "nmf2", "nmf3"),
+               names_to = "component",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_input), value = TRUE)
+
+head(dta_cmfts_input)
+```
+
+Function for calculating CMFTS features:
+
+```{r}
+fn_extract_cmfts_features <- function(ts_values) {
+  ts_matrix <- matrix(as.numeric(ts_values), nrow = 1)
+  cmfts_features <- cmfts::cmfts(dataset = ts_matrix)
+  return(cmfts_features)
+}
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_output <- apply(
+  dta_cmfts_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_input[, c("video_filename", "isfakeorreal", "emotion", "component")],
+    .
+  )
+
+head(dta_cmfts_output)
+```
+
+## CMFTS Preprocessing
+
+```{r}
+dta_cmfts_output_concat <- dta_cmfts_output %>%
+  pivot_wider(
+    names_from = component,
+    values_from = -c(video_filename, component),
+    names_glue = "{.value}_{component}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -3:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_output_concat)[3] <- c("emotion")
+
+head(dta_cmfts_output_concat)
+```
+
+### Missing Values
+
+```{r}
+dta_cmfts_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+We can remove these columns:
+
+```{r}
+# Drop permutation entropy columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -13:-15]
+```
+
+### Infinite Values
+
+```{r}
+dta_cmfts_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Only shannon entropy columns have infinite values. We can convert these to NA and then impute with missForest.
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_output_concat)) {
+  dta_cmfts_output_concat[[col]][is.infinite(dta_cmfts_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_output_imputed <- dta_cmfts_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_output_imputed[, sapply(dta_cmfts_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE: 0.0005 (very low reconstruction error).
+
+### Features with Zero SD
+
+Features with 0 SD contribute no meaningful information and can be removed.
+
+```{r}
+sds_zerosd <- sapply(dta_cmfts_output_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_output_imputed_zerosd <- dta_cmfts_output_imputed[, names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd > 0)]]
+```
+
+# Feature Selection
+
+## Correlation
+
+Starting with a quick correlation-based elimination is a good way to find out which columns can be removed to reduce pairwise correlations. Columns that are highly correlated with one another are likely to be redundant for the classifier.
+
+```{r}
+# Cutoff 0.9
+cat("ZeroSD\n\nCutoff = 0.9\n")
+caret::findCorrelation(cor(dta_cmfts_output_imputed_zerosd[, 4:114]), cutoff = 0.9)
+
+# Cutoff 0.95
+cat("\nCutoff = 0.95\n")
+caret::findCorrelation(cor(dta_cmfts_output_imputed_zerosd[, 4:114]), cutoff = 0.95)
+```
+
+A cutoff of 0.9 flagged 8 features for removal due to being highly correlated with at least one other feature. A cutoff point of 0.95 flagged no features for removal, same as before.
+
+## Recursive Feature Elimination (RFE)
+
+```{r}
+x_train_zerosd <- dta_cmfts_output_imputed_zerosd[, 4:114]
+y_train_zerosd <- as.factor(dta_cmfts_output_imputed_zerosd$isfakeorreal)
+
+# Set up RFE control using random forest (fitting params)
+control <- caret::rfeControl(functions = caret::rfFuncs,
+                      method = "cv",
+                      number = 10,
+                      verbose = TRUE)  # 10-fold cross validation
+
+# Define subset sizes to evaluate
+# Model will start with 5 predictors, incrementing by 5
+subsetSizes <- seq(5, ncol(x_train_zerosd), by = 5)
+
+# RFE
+set.seed(12345)
+rfeResults_zerosd <- caret::rfe(x = x_train_zerosd,
+                     y = y_train_zerosd,
+                     sizes = subsetSizes,
+                     rfeControl = control)
+
+# Results
+print(rfeResults_zerosd)
+plot(rfeResults_zerosd)
+```
+
+RFE selected an optimum feature set of 25 variables, achieving 45.31% accuracy.
+
+## Boruta
+
+```{r}
+set.seed(12345)
+
+# Create a subset of data including only the outcome and predictors
+boruta_train_zsd <- dta_cmfts_output_imputed_zerosd[, c("isfakeorreal", 
+                                                        names(dta_cmfts_output_imputed_zerosd)[4:114])]
+
+# Make sure outcome variable is factor
+boruta_train_zsd$isfakeorreal <- as.factor(boruta_train_zsd$isfakeorreal)
+
+# Boruta
+boruta_output_zsd <- Boruta::Boruta(isfakeorreal ~ ., data = boruta_train_zsd, doTrace = 2)
+
+# Output
+print(boruta_output_zsd)
+plot(boruta_output_zsd, las = 2)
+
+# Solve tentative features
+Boruta::TentativeRoughFix(boruta_output_zsd)
+```
+
+Boruta initially identified no features as important, but one as tentative:
+
+-   shannon_entropy_SG_nmf2
+
+After roughfixing, this feature was deemed as important.
+
+# Create Test Set
+
+To create the test set, we need to project the NMF model onto the AU data from the test set, then derive CMFTS features from these.
+
+## Project onto Test Set
+
+```{r}
+library(Matrix)
+library(nnls)
+
+# 1. Extract scaled basis matrix from model
+project_W_train_raw <- model_nmf$w
+project_d_train <- as.numeric(model_nmf$d)
+project_W_train <- as.matrix(project_W_train_raw %*% Diagonal(x = project_d_train))
+
+# 2. Set up loop to project each video
+
+# Empty list to store final activation matrices
+project_activations_list <- list()
+
+for (video_name in unique(dta_nmf_input_test$video_filename)) {
+  # Prepare matrix for current video
+  project_V_new <- dta_nmf_input_test %>%
+    filter(video_filename == video_name) %>%
+    select(starts_with("AU")) %>%
+    as.matrix()
+  
+  # Transpose so that features are rows and frames are columns
+  project_v_new <- t(project_V_new)
+  
+  # Set up variables for inner NNLS loop
+  project_k <- ncol(project_W_train)
+  project_n_new <- ncol(project_v_new)
+  project_h_new <- matrix(NA_real_, nrow = project_k, ncol = project_n_new)
+  
+  # Project each frame using NNLS
+  for (i in seq_len(project_n_new)) {
+    project_h_new[, i] <- nnls(project_W_train, project_v_new[, i])$x
+  }
+  
+  # Apply scaling to projected H matrix
+  project_h_new_scaled <- sweep(project_h_new, 1, project_d_train, "*")
+  
+  # Transpose final activation matrix so its frames x components
+  project_h_new_transposed <- t(project_h_new_scaled)
+  
+  # Store result in list
+  project_activations_list[[video_name]] <- project_h_new_transposed
+}
+
+cat("Projection complete.\n")
+cat(paste("The list now contains", length(project_activations_list), "activation matrices.\n\n"))
+cat("Dimensions of activation matrix for first video (frames x components):\n")
+print(dim(project_activations_list[[1]]))
+```
+
+## Validate
+
+```{r}
+project_V_orig <- dta_nmf_input_test %>%
+  #filter(video_filename == names(project_activations_list)[1]) %>%
+  select(starts_with("AU")) %>%
+  as.matrix()
+
+project_H_new <- do.call(rbind, project_activations_list)
+
+# Reconstruct
+project_V_recon <- project_H_new %*% t(model_nmf$w)
+
+# Calculate R squared
+project_r2_validation <- 1 - sum((project_V_orig - project_V_recon)^2) / sum((project_V_orig - mean(project_V_orig))^2)
+
+cat(sprintf("Reconstruction R2 for entire test set: %.4f\n", project_r2_validation))
+```
+
+R2 = 0.4892
+
+This means that the trained NMF model can explain approximately 49% of the total variance in the unseen test set. This is marginally better than in the previous analysis (emotion and no emotion videos combined), suggesting that splitting the problem into two separate pipelines simplifies things for the model somewhat.
+
+## Create Final Test Set
+
+```{r}
+dta_h_matrix_test <- as.data.frame(project_H_new)
+colnames(dta_h_matrix_test) <- paste0("nmf", 1:ncol(dta_h_matrix_test))
+
+dta_metadata_test <- dta_nmf_input_test %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, frame)
+
+dta_nmf_test_output <- bind_cols(dta_metadata_test, dta_h_matrix_test)
+
+head(dta_nmf_test_output)
+```
+
+## Create CMFTS Features
+
+```{r}
+dta_cmfts_test_input <- dta_nmf_test_output %>%
+  select(video_filename, isfakeorreal, emotion, frame, nmf1, nmf2, nmf3) %>%
+  pivot_longer(cols = c("nmf1", "nmf2", "nmf3"),
+               names_to = "component",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_test_input), value = TRUE)
+
+head(dta_cmfts_test_input)
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_test_output <- apply(
+  dta_cmfts_test_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_test_input[, c("video_filename", "isfakeorreal", "emotion", "component")],
+    .
+  )
+
+head(dta_cmfts_test_output)
+```
+
+Now to preprocess in the same way as before.
+
+## CMFTS Preprocessing
+
+```{r}
+dta_cmfts_test_output_concat <- dta_cmfts_test_output %>%
+  pivot_wider(
+    names_from = component,
+    values_from = -c(video_filename, component),
+    names_glue = "{.value}_{component}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -3:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_test_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_test_output_concat)[3] <- c("emotion")
+
+head(dta_cmfts_test_output_concat)
+```
+
+Missing values:
+
+```{r}
+dta_cmfts_test_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+```{r}
+# Drop permutation entropy columns
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -13:-15]
+```
+
+Infinite values:
+
+```{r}
+dta_cmfts_test_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_test_output_concat)) {
+  dta_cmfts_test_output_concat[[col]][is.infinite(dta_cmfts_test_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_test_output_imputed <- dta_cmfts_test_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_test_output_imputed[, sapply(dta_cmfts_test_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_test_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE: 0.00037
+
+Features with zero SD:
+
+```{r}
+sds_zerosd <- sapply(dta_cmfts_test_output_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_test_output_imputed_zerosd <- dta_cmfts_test_output_imputed[, names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd > 0)]]
+```
+
+The test set is now ready: `dta_cmfts_test_output_imputed_zerosd`.
+
+# Classifiers
+
+I will create two models for each classifier.
+
+-   Model 1 = Only features confirmed as important by Boruta (n=2)
+
+-   Model 2 = Same feature types but across all components (n=6)
+
+The reason for this stems from the idea that the three NMF components represent interrelated aspects of facial expression, so if a feature type was most discriminative for one component, its behaviour in other components might still hold relevant information for classification.
+
+```{r}
+set.seed(12345)
+
+# Train set (UNCOMMENT FOR IMBALANCED EMOTION)
+dta_cmfts_output_imputed_zerosd$isfakeorreal <- factor(
+  dta_cmfts_output_imputed_zerosd$isfakeorreal,
+  levels = c("real", "fake")
+)
+
+# dta_cmfts_emotion_balanced$isfakeorreal <- factor(
+#   dta_cmfts_emotion_balanced$isfakeorreal,
+#   levels = c("real", "fake")
+# )
+
+boruta_selected_features <- c(
+  "shannon_entropy_SG_nmf2"
+)
+
+# Select these features plus the outcome variable
+dta_classifier_train_new <- dta_cmfts_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+# dta_classifier_train_new <- dta_cmfts_emotion_balanced %>%
+#   select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+base_feature_types <- c(
+  "shannon_entropy_SG")
+
+all_component_features <- character()
+for (base_feat in base_feature_types) {
+  for (comp_num in 1:3) {
+    all_component_features <- c(all_component_features, paste0(base_feat, "_nmf", comp_num))
+  }
+}
+
+dta_classifier_train_new_all <- dta_cmfts_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(all_component_features))
+
+# dta_classifier_train_new_all <- dta_cmfts_emotion_balanced %>%
+#   select(video_filename, emotion, isfakeorreal, all_of(all_component_features))
+
+dta_classifier_train_new$video_filename <- dta_cmfts_output_imputed_zerosd$video_filename
+
+# dta_classifier_train_new$video_filename <- dta_cmfts_emotion_balanced$video_filename
+
+
+
+# Test set
+dta_cmfts_test_output_imputed_zerosd$isfakeorreal <- factor(
+  dta_cmfts_test_output_imputed_zerosd$isfakeorreal,
+  levels = c("real", "fake")
+)
+
+dta_classifier_test_new <- dta_cmfts_test_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+dta_classifier_test_new_all <- dta_cmfts_test_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(all_component_features))
+
+dta_classifier_test_new$video_filename <- dta_cmfts_test_output_imputed_zerosd$video_filename
+```
+
+## Random Forest
+
+### Model 1
+
+```{r}
+# Cross validation setup
+classifier_control <- caret::trainControl(
+  method = "none",
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+rf_fit_model1 <- caret::train(
+  isfakeorreal ~ ., # nmf
+  data = dta_classifier_train_new[, 3:4],
+  method = "rf",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(mtry = 4)
+)
+
+print(rf_fit_model1)
+plot(caret::varImp(rf_fit_model1)) # To see feature importance
+```
+
+Evaluate on unseen data:
+
+```{r}
+rf_model_1_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model1, newdata = dta_classifier_test_new),
+  reference = dta_classifier_test_new$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_1_performance)
+```
+
+Accuracy = 48.21%
+
+95% CI = (0.3466, 0.6197)
+
+NIR = 0.5
+
+P = 0.6556
+
+Kappa = -0.0357
+
+Sensitivity = 46.43%
+
+Specificity = 50%
+
+### Model 2
+
+```{r}
+# Cross validation setup
+classifier_control <- caret::trainControl(
+  method = "none",
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+rf_fit_model2 <- caret::train(
+  isfakeorreal ~ ., # nmf
+  data = dta_classifier_train_new_all[, 3:6],
+  method = "rf",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(mtry = 4)
+)
+
+print(rf_fit_model2)
+plot(caret::varImp(rf_fit_model2)) # To see feature importance
+```
+
+Evaluate on unseen data:
+
+```{r}
+rf_model_2_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model2, newdata = dta_classifier_test_new_all),
+  reference = dta_classifier_test_new_all$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_2_performance)
+```
+
+Accuracy = 51.79%
+
+95% CI = (0.3803, 0.6534)
+
+NIR = 0.5
+
+P = 0.4469
+
+Kappa = 0.0357
+
+Sensitivity = 50%
+
+Specificity = 53.57%
+
+## C5.0B
+
+### Model 1
+
+```{r}
+set.seed(12345)
+
+c50_fit_model1 <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new[, 3:4],
+  method = "C5.0",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(
+    model = "tree",
+    trials = 20,  # number of boosting iterations
+    winnow = FALSE
+  )
+)
+
+print(c50_fit_model1)
+plot(varImp(c50_fit_model1)) # To see feature importanc
+```
+
+Evaluate on unseen data:
+
+```{r}
+c50_model_1_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model1, newdata = dta_classifier_test_new),
+  reference = dta_classifier_test_new$isfakeorreal,
+  positive = "fake"
+)
+
+print(c50_model_1_performance)
+```
+
+Accuracy = 58.93%
+
+95% CI = (0.4498, 0.719)
+
+NIR = 0.5
+
+P = 0.1144
+
+Kappa = 0.1786
+
+Sensitivity = 67.86%
+
+Specificity = 50%
+
+## Model 2
+
+```{r}
+set.seed(12345)
+
+c50_fit_model2 <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_all[, 3:6],
+  method = "C5.0",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(
+    model = "tree",
+    trials = 20,  # number of boosting iterations
+    winnow = FALSE
+  )
+)
+
+print(c50_fit_model2)
+plot(varImp(c50_fit_model2)) # To see feature importanc
+```
+
+Evaluate on unseen data:
+
+```{r}
+c50_model_2_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model2, newdata = dta_classifier_test_new_all),
+  reference = dta_classifier_test_new_all$isfakeorreal,
+  positive = "fake"
+)
+
+print(c50_model_2_performance)
+```
+
+Accuracy = 58.93%
+
+95% CI = (0.4498, 0.719)
+
+NIR = 0.5
+
+P = 0.1144
+
+Sensitivity = 67.86%
+
+Specificity = 50%
+
+Same as Model 1.
+
+# 40 Held-Out Videos
+
+I will test all models on the 40 held-out videos from the human participant experiment as another test set. I will do this first for the entire 40 videos and then for just emotion only.
+
+But first, I will have to derive the CMFTS features for these videos by projecting the NMF model first.
+
+## Project NMF to AU Data
+
+```{r}
+dta_video_au_40 <- read.csv("../human_data_preprocess/dta_video_au_final.csv")
+
+# UNCOMMENT FOR EMOTION VIDEOS ONLY
+dta_video_au_40 <- dta_video_au_40 %>%
+  filter(emotion_yes_no_new == "y")
+
+library(Matrix)
+library(nnls)
+
+# 1. Extract scaled basis matrix from model
+project_W_train_raw <- model_nmf$w
+project_d_train <- as.numeric(model_nmf$d)
+project_W_train <- as.matrix(project_W_train_raw %*% Diagonal(x = project_d_train))
+
+# 2. Set up loop to project each video
+
+# Empty list to store final activation matrices
+project_40_activations_list <- list()
+
+for (video_name in unique(dta_video_au_40$stimnopath)) {
+  # Prepare matrix for current video
+  project_V_new <- dta_video_au_40 %>%
+    filter(stimnopath == video_name) %>%
+    select(starts_with("au")) %>%
+    as.matrix()
+  
+  # Transpose so that features are rows and frames are columns
+  project_v_new <- t(project_V_new)
+  
+  # Set up variables for inner NNLS loop
+  project_k <- ncol(project_W_train)
+  project_n_new <- ncol(project_v_new)
+  project_h_new <- matrix(NA_real_, nrow = project_k, ncol = project_n_new)
+  
+  # Project each frame using NNLS
+  for (i in seq_len(project_n_new)) {
+    project_h_new[, i] <- nnls(project_W_train, project_v_new[, i])$x
+  }
+  
+  # Apply scaling to projected H matrix
+  project_h_new_scaled <- sweep(project_h_new, 1, project_d_train, "*")
+  
+  # Transpose final activation matrix so its frames x components
+  project_h_new_transposed <- t(project_h_new_scaled)
+  
+  # Store result in list
+  project_40_activations_list[[video_name]] <- project_h_new_transposed
+}
+
+cat("Projection complete.\n")
+cat(paste("The list now contains", length(project_40_activations_list), "activation matrices.\n\n"))
+cat("Dimensions of activation matrix for first video (frames x components):\n")
+print(dim(project_40_activations_list[[1]]))
+```
+
+## Validation
+
+```{r}
+project_40_V_orig <- dta_video_au_40 %>%
+  #filter(video_filename == names(project_activations_list)[1]) %>%
+  select(starts_with("AU")) %>%
+  as.matrix()
+
+project_40_H_new <- do.call(rbind, project_40_activations_list)
+
+# Reconstruct
+project_40_V_recon <- project_40_H_new %*% t(model_nmf$w)
+
+# Calculate R squared
+project_40_r2_validation <- 1 - sum((project_40_V_orig - project_40_V_recon)^2) / sum((project_40_V_orig - mean(project_40_V_orig))^2)
+
+cat(sprintf("Reconstruction R2 for entire test set: %.4f\n", project_40_r2_validation))
+```
+
+R2 (All 40 videos) = 0.3702
+
+R2 (Only emotion) = 0.4078
+
+This suggests that performance is better when we stick with emotion only videos.
+
+## Create Final Test Set
+
+```{r}
+dta_40_h_matrix_test <- as.data.frame(project_40_H_new)
+colnames(dta_40_h_matrix_test) <- paste0("nmf", 1:ncol(dta_40_h_matrix_test))
+
+dta_40_metadata_test <- dta_video_au_40 %>%
+  select(stimnopath, isfakeorreal, emotion_yes_no_new, frame)
+
+dta_40_nmf_test_output <- bind_cols(dta_40_metadata_test, dta_40_h_matrix_test)
+
+head(dta_40_nmf_test_output)
+```
+
+## CMFTS Features
+
+```{r}
+# Make sure max frames is 241
+dta_40_nmf_test_output <- dta_40_nmf_test_output %>%
+  filter(frame < 242)
+
+
+dta_cmfts_40_test_input <- dta_40_nmf_test_output %>%
+  select(stimnopath, isfakeorreal, emotion_yes_no_new, frame, nmf1, nmf2, nmf3) %>%
+  pivot_longer(cols = c("nmf1", "nmf2", "nmf3"),
+               names_to = "component",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_40_test_input), value = TRUE)
+
+head(dta_cmfts_40_test_input)
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_40_test_output <- apply(
+  dta_cmfts_40_test_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_40_test_input[, c("stimnopath", "isfakeorreal", "emotion_yes_no_new", "component")],
+    .
+  )
+
+head(dta_cmfts_40_test_output)
+```
+
+## CMFTS Preprocessing
+
+```{r}
+dta_cmfts_40_test_output_concat <- dta_cmfts_40_test_output %>%
+  pivot_wider(
+    names_from = component,
+    values_from = -c(stimnopath, component),
+    names_glue = "{.value}_{component}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_40_test_output_concat <- dta_cmfts_40_test_output_concat[, -3:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_40_test_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_40_test_output_concat)[3] <- c("emotion")
+colnames(dta_cmfts_40_test_output_concat)[1] <- c("video_filename")
+
+head(dta_cmfts_40_test_output_concat)
+```
+
+Missing values:
+
+```{r}
+dta_cmfts_40_test_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+```{r}
+# Drop permutation entropy columns
+dta_cmfts_40_test_output_concat <- dta_cmfts_40_test_output_concat[, -13:-15]
+```
+
+Infinite values:
+
+```{r}
+dta_cmfts_40_test_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_40_test_output_concat)) {
+  dta_cmfts_40_test_output_concat[[col]][is.infinite(dta_cmfts_40_test_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_40_test_output_imputed <- dta_cmfts_40_test_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_40_test_output_imputed[, sapply(dta_cmfts_40_test_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_40_test_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE (Emotion only) = 0.00088
+
+Same NRMSE for all videos.
+
+Features with zero SD:
+
+```{r}
+sds_zerosd <- sapply(dta_cmfts_40_test_output_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_40_test_output_imputed_zerosd <- dta_cmfts_40_test_output_imputed[, names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd > 0)]]
+```
+
+The final dataset for this is ready: `dta_cmfts_40_test_output_imputed_zerosd`.
+
+## Model Predictions
+
+First to refine the test set so that it only has the relevant features.
+
+```{r}
+# Test set
+dta_cmfts_40_test_output_imputed_zerosd$isfakeorreal <- factor(
+  dta_cmfts_40_test_output_imputed_zerosd$isfakeorreal,
+  levels = c("real", "fake")
+)
+
+dta_classifier_40_test_new <- dta_cmfts_40_test_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+dta_classifier_40_test_new_all <- dta_cmfts_40_test_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(all_component_features))
+
+dta_classifier_40_test_new$video_filename <- dta_cmfts_40_test_output_imputed_zerosd$video_filename
+
+head(dta_classifier_40_test_new_all)
+```
+
+### RF Model 1
+
+```{r}
+rf_model_1_40_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model1, newdata = dta_classifier_40_test_new),
+  reference = dta_classifier_40_test_new$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_1_40_performance)
+```
+
+Emotion videos only (n=16):
+
+Accuracy = 50%
+
+95% CI = (0.2465, 0.7535)
+
+NIR = 0.5
+
+P = 0.5982
+
+Kappa = 0
+
+Sensitivity = 50%
+
+Specificity = 50%
+
+Precision = 50%
+
+F1 = 50%
+
+All videos (n=40):
+
+Accuracy = 47.5%
+
+95% CI = (0.3151, 0.6387)
+
+NIR = 0.5
+
+P = 0.6821
+
+Kappa = -0.05
+
+Sensitivity = 55%
+
+Specificity = 40%
+
+Precision = 47.83%
+
+F1 = 51.16%
+
+### RF Model 2
+
+```{r}
+rf_model_2_40_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model2, newdata = dta_classifier_40_test_new_all),
+  reference = dta_classifier_40_test_new_all$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_2_40_performance)
+```
+
+Emotion videos only (n=16):
+
+-   Same as model 1.
+
+All videos (n=40):
+
+Accuracy = 50%
+
+95% CI = (0.338, 0.662)
+
+NIR = 0.5
+
+P = 0.5627
+
+Kappa = 0
+
+Sensitivity = 55%
+
+Specificity = 45%
+
+Precision = 50%
+
+F1 = 52.38%
+
+### C5.0B Model 1
+
+```{r}
+c50_model_1_40_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model1, newdata = dta_classifier_40_test_new),
+  reference = dta_classifier_40_test_new$isfakeorreal,
+  positive = "fake"
+)
+
+print(c50_model_1_40_performance)
+```
+
+Emotion videos only (n=16):
+
+Accuracy = 62.50%
+
+95% CI = (0.3543, 0.848)
+
+NIR = 0.5
+
+P = 0.2272
+
+Kappa = 0.25
+
+Sensitivity = 75%
+
+Specificity = 50%
+
+Precision = 60%
+
+F1 = 66.67%
+
+All videos (n=40):
+
+Accuracy = 47.50%
+
+95% CI = (0.3151, 0.6387)
+
+NIR = 0.5
+
+P = 0.6821
+
+Kappa = -0.05
+
+Sensitivity = 65%
+
+Specificity = 30%
+
+Precision = 48.15%
+
+F1 = 55.32%
+
+### C5.0B Model 2
+
+```{r}
+c50_model_2_40_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model2, newdata = dta_classifier_40_test_new_all),
+  reference = dta_classifier_40_test_new_all$isfakeorreal,
+  positive = "fake"
+)
+
+print(c50_model_2_40_performance)
+```
+
+Emotion videos only (n=16):
+
+-   Same as model 1.
+
+All videos (n=40):
+
+-   Same as model 1.

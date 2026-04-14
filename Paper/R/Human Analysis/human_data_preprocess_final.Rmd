@@ -1,0 +1,505 @@
+---
+title: "human_data_preprocess_final"
+output: html_document
+---
+
+# Introduction
+
+This script prepares all data related to the human participant experiment, which used 40 held-out videos not seen by the main models during training. Its purpose is to generate two distinct sets of CMFTS features for these 40 videos, corresponding to our two main analytical pipelines:
+
+1.  **NMF-Based Pipeline:** Features derived from projecting the 40 videos onto the NMF model trained on the main 80% training set.
+2.  **Direct AU Pipeline:** Our best-performing approach. Features are derived directly from the time series of the three most representative AUs (AU01, AU12, AU17), bypassing the NMF step.
+
+Crucially, this script applies the **correct normalization method**, learning the scaling parameters from the main training dataset (`dta_nmf_input_train`) to ensure consistency and prevent any data leakage.
+
+The final outputs will be two clean feature sets for the 40 videos and the processed human judgment data, ready for the `human_data_analyses.Rmd` script.
+
+------------------------------------------------------------------------
+
+# 1. Load Libraries & Data
+
+```{r setup}
+library(tidyverse)
+library(dplyr)
+
+# UNCOMMENT TO INSTALL CMFTS
+# devtools::install_github("fjbaldan/CMFTS")
+
+# Load raw AU data for 40 held out videos
+dta_raw_video_au <- read.csv("video_aus.csv")
+
+# Load raw human judgement data
+dta_raw_full_stim <- read.csv("dta_raw_full_stim.csv")
+dta_raw_pld <- read.csv("dta_raw_PLD.csv")
+
+# Load main 80% training data to learn normalisation parameters
+dta_nmf_input_train <- read.csv("../final_analysis/dta_nmf_input_train.csv")
+
+# Load NMF model trained on 80% training data
+model_nmf_trained <- readRDS("../final_analysis/model_nmf_trained.rds")
+
+```
+
+# 2. Preprocess 40 Held-Out Videos
+
+OUTDATED - See final_analysis_NMF_check.Rmd for the updated version.
+
+## Truncate to 241 Frames
+
+We need to make sure all videos are 241 frames to ensure consistency with other pipelines.
+
+```{r truncate-241-frames}
+dta_raw_video_au <- dta_raw_video_au %>%
+  group_by(stimnopath) %>%
+  arrange(frame, .by_group = T) %>%  # Make sure frames are in correct order
+  slice_head(n = 241) %>%  # Keep only first 241 rows in each group
+  ungroup()
+```
+
+## Smoothing
+
+First step is to apply the same 4-frame moving average smoothing to the raw AU data of the 40 videos.
+
+```{r smoothing}
+dta_video_au_smth <- dta_raw_video_au %>%
+  # Select only the AU intensity cols and metadata
+  select(stimnopath, frame, emotion_yes_no_new, isfakeorreal, contains("_r_")) %>%
+  group_by(stimnopath) %>%
+  mutate(across(contains("_r_"),
+                ~ zoo::rollmean(., k = 4, fill = "extend", align = "left"),
+                .names = "smth_{col}")) %>%
+  ungroup() %>%
+  select(-contains("_r_"), starts_with("smth_") | !contains("_r_"))
+
+```
+
+I am going to clean up the names:
+
+```{r clean_names}
+dta_video_au_smth <- dta_video_au_smth %>%
+  rename(
+    video_filename = stimnopath,
+    emotion = emotion_yes_no_new
+  ) %>%
+  rename_with(~ sub("^smth_", "", .), starts_with("smth_")) %>%
+  rename_with(~ gsub("_r_", "_", .), contains("_r_")) %>%
+  mutate(video_filename = sub("\\.mp4$", "", video_filename)) %>%
+  rename_with(~ sub("^au", "AU", .), starts_with("AU"))
+```
+
+## Normalisation
+
+Next step is to use the means and SD calculated from the main training data to normalise the 40 held-out videos. This ensures that the 40 videos are scaled in exactly the same way as the model's training and test data.
+
+```{r normalisation}
+# Get names of AU cols
+au_cols_train <- names(dta_nmf_input_train)[grepl("^AU", names(dta_nmf_input_train))]
+au_cols_40 <- names(dta_video_au_smth)[grepl("^AU", names(dta_video_au_smth))]
+
+# Learn scaling params from main 80% train set only
+norm_params <- list()
+for(col in au_cols_train) {
+  mean_val <- mean(dta_nmf_input_train[[col]], na.rm = T)
+  sd_val <- sd(dta_nmf_input_train[[col]], na.rm = T)
+  
+  # Handle AUs with zero SD in training data
+  if(is.na(sd_val) || sd_val == 0) {
+    sd_val <- 1  # Prevent division by zero
+  }
+  
+  # Store params
+  norm_params[[col]] <- c(mean = mean_val, sd = sd_val)
+}
+
+# Function to apply z-score with non-negative shift
+fn_z_score_shift <- function(x, mean_val, sd_val) {
+  z <- (x - mean_val) / sd_val
+  z_shifted <- z - min(z, na.rm = T)
+  z_shifted[is.na(z_shifted)] <- 0  # Impute any NAs with 0
+  return(z_shifted)
+}
+
+# Apply learned params to 40 videos
+dta_video_au_norm <- dta_video_au_smth
+
+for(i in seq_along(au_cols_40)) {
+  col_40 <- au_cols_40[i]
+  col_train <- au_cols_train[i]
+  
+  params <- norm_params[[col_train]]
+  
+  dta_video_au_norm[[col_40]] <- fn_z_score_shift(dta_video_au_norm[[col_40]],
+                                                  params["mean"], params["sd"])
+}
+```
+
+# 3. Pipeline 1: NMF
+
+In this section, I will project the 40 normalised videos onto the basis matrix of the NMF model that was trained on the main dataset.
+
+## NMF Projection
+
+```{r nmf-projection}
+# Extract scaled basis matrix from NMF model
+project_W_train_raw <- model_nmf_trained$w
+project_d_train <- as.numeric(model_nmf_trained$d)
+project_W_train <- as.matrix(project_W_train_raw %*% Matrix::Diagonal(x = project_d_train))
+
+# Loop through each 40 video to project
+project_activations_list <- list()
+for(video_name in unique(dta_video_au_norm$video_filename)) {
+  # Prepare AU matrix for current vid
+  project_V_new <- dta_video_au_norm %>%
+    filter(video_filename == video_name) %>%
+    select(starts_with("AU")) %>%
+    as.matrix()
+  
+  # Project each frame using NNLS
+  project_h_new <- matrix(NA_real_, nrow = ncol(project_W_train), ncol = nrow(project_V_new))
+  for(i in seq_len(nrow(project_V_new))) {
+    project_h_new[, i] <- nnls::nnls(project_W_train, project_V_new[i, ])$x
+  }
+  
+  # Store transposed result (frames x components)
+  project_activations_list[[video_name]] <- t(project_h_new)
+}
+```
+
+## CMFTS Extraction
+
+Extract CMFTS features from projected components:
+
+```{r extract-CMFTS-nmf}
+dta_cmfts_nmf_features <- tibble()
+
+for (video_name in names(project_activations_list)) {
+  h_matrix <- project_activations_list[[video_name]]
+
+  video_features_list <- vector("list", ncol(h_matrix))
+  for (i in seq_len(ncol(h_matrix))) {
+    features <- cmfts::cmfts(matrix(h_matrix[, i], nrow = 1))
+
+    # Make sure names exist
+    if (is.null(names(features)) || any(names(features) == "")) {
+      names(features) <- paste0("cmfts_", seq_along(features))
+    }
+
+    # Add nmf suffix
+    names(features) <- paste0(names(features), "_nmf", i)
+
+    # Make a 1 row tibble
+    video_features_list[[i]] <- tibble::as_tibble_row(as.list(features))
+  }
+
+  video_feature_row <- bind_cols(video_features_list) |>
+    mutate(video_filename = video_name, .before = 1)
+
+  dta_cmfts_nmf_features <- bind_rows(dta_cmfts_nmf_features, video_feature_row)
+}
+```
+
+## CMFTS Preprocessing
+
+I will now preprocess the CMFTS features in the exact same way as in previous pipelines.
+
+First check for missing values:
+
+```{r cmfts-preprocessing-missing-values-NMF}
+dta_cmfts_nmf_features %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+Remove permutation entropy columns as all values are missing:
+
+```{r cmfts-remove-permutation-entropy-nmf}
+dta_cmfts_nmf_features <- dta_cmfts_nmf_features %>%
+  select(-starts_with("permutation_"))
+```
+
+Now check for infinite values:
+
+```{r cmfts-preprocessing-infinite-values}
+dta_cmfts_nmf_features %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Only shannon_entropy_CS columns have infinite values. This can be sorted using `missForest` for smart imputation.
+
+```{r cmfts-impute-nmf}
+# Convert Infs to NA
+for(col in names(dta_cmfts_nmf_features)) {
+  dta_cmfts_nmf_features[[col]][is.infinite(dta_cmfts_nmf_features[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_nmf_features_imputed <- dta_cmfts_nmf_features
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_nmf_features_imputed[, sapply(dta_cmfts_nmf_features_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_nmf_features_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+The NRMSE is quite high (0.506). This is probably due to the low sample size (n=40). Although there were only 2 infinite values in each shannon_entropy_CS column, there was not a lot of data for missForest to reliably learn from. This should, however, be fine and it is a better imputation method than simply imputing with the median, etc.
+
+Now check for features with zero SD:
+
+```{r cmfts-preprocessing-zero-sd-nmf}
+sds_zerosd <- sapply(dta_cmfts_nmf_features_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_nmf_features_imputed_zerosd <- dta_cmfts_nmf_features_imputed[, names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd > 0)]]
+```
+
+Removed 9 columns.
+
+## Add isfakeorreal Column
+
+```{r cmfts-add-isfakeorreal-col-nmf}
+isfakeorreal_map <- dta_raw_video_au %>%
+  select(stimnopath, isfakeorreal) %>%
+  distinct() %>%
+  mutate(video_filename = sub("\\.mp4$", "", stimnopath)) %>%
+  select(video_filename, isfakeorreal)
+
+# Join to CMFTS features
+dta_cmfts_40_videos_nmf <- dta_cmfts_nmf_features_imputed_zerosd %>%
+  left_join(isfakeorreal_map, by = "video_filename")
+
+# Reorder cols
+dta_cmfts_40_videos_nmf <- dta_cmfts_40_videos_nmf %>%
+  select(video_filename, isfakeorreal, everything())
+```
+
+# 4. Pipeline 2: Representative AUs
+
+This pipeline removes the NMF step and calculates CMFTS features directly on the normalised time series of the three representative AUs (see `final_analysis_NMF_check.Rmd`). This pipeline achieved the best classifier performance, so it will be included alongside the best-performance NMF pipeline for comparison.
+
+## CMFTS Extraction
+
+```{r cmfts-extraction-AUs}
+# Select only representative AUs for the 40 videos
+dta_direct_au <- dta_video_au_norm %>%
+  select(video_filename, 
+         frame, 
+         AU01_inner_brow_raiser, 
+         AU12_lip_corner_puller, 
+         AU17_chin_raiser)
+
+# Extract CMFTS features from the AU time series
+dta_cmfts_direct_au_features <- dta_direct_au %>%
+  pivot_longer(cols = starts_with("AU"), names_to = "AU", values_to = "activation") %>%
+  group_by(video_filename, AU) %>%
+  summarise(ts_data = list(activation), .groups = "drop") %>%
+  mutate(cmfts_features = map(ts_data, ~cmfts::cmfts(matrix(., nrow = 1)))) %>%
+  unnest_wider(cmfts_features) %>%
+  select(-ts_data) %>%
+  pivot_wider(names_from = AU, values_from = -c(video_filename, AU), names_glue = "{.value}_{AU}")
+```
+
+There are some errors caused by the fact that some AUs for some videos have an SD of zero. This is when an AU is not activated at all in a video and is zero throughout. This is normal, but causes some NaN or Inf values in the CMFTS extraction. These will be dealt with in the next section.
+
+## CMFTS Preprocessing
+
+Missing values:
+
+```{r cmfts-preprocessing-missing-values-AUs}
+dta_cmfts_direct_au_features %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+Again, all of the permutation entropy columns have all missing values. Some other columns have 4 missing values, probably because 4 videos had constant AU values. I will remove the permutation entropy columns and leave the rest for imputation with missForest.
+
+Remove permutation entropy columns:
+
+```{r cmfts-remove-permutation-entropy-AUs}
+dta_cmfts_direct_au_features <- dta_cmfts_direct_au_features %>%
+  select(-starts_with("permutation_"))
+```
+
+Check for infinite values:
+
+```{r cmfts-preprocessing-infinite-values-AUs}
+dta_cmfts_direct_au_features %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Two of the three shannon_entropy_CS columns have nearly all missing values. One has half missing values. I will remove these columns too as missForest imputation would struggle to impute these due to the sheer amount of missing data.
+
+Remove shannon_entropy_CS columns:
+
+```{r cmfts-remove-shannon-entropy-CS-AUs}
+dta_cmfts_direct_au_features <- dta_cmfts_direct_au_features %>%
+  select(-starts_with("shannon_entropy_CS_"))
+```
+
+Impute missing values:
+
+```{r cmfts-preprocessing-impute-AUs}
+# Convert Infs to NA
+for(col in names(dta_cmfts_direct_au_features)) {
+  dta_cmfts_direct_au_features[[col]][is.infinite(dta_cmfts_direct_au_features[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_direct_au_features_imputed <- dta_cmfts_direct_au_features
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_direct_au_features_imputed[, sapply(dta_cmfts_direct_au_features_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_direct_au_features_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE of 0.011, which is low. This suggests missForest was more effective than previous pipeline, probably due to removing the shannon_entropy_CS columns.
+
+Check for zero SD columns:
+
+```{r cmfts-preprocessing-zero-SD-AUs}
+sds_zerosd <- sapply(dta_cmfts_direct_au_features_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_direct_au_features_imputed <- dta_cmfts_direct_au_features_imputed[, names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd > 0)]]
+```
+
+Removed 9 columns.
+
+## Add isfakeorreal Column
+
+```{r cmfts-add-isfakeorreal-col-AUs}
+isfakeorreal_map <- dta_raw_video_au %>%
+  select(stimnopath, isfakeorreal) %>%
+  distinct() %>%
+  mutate(video_filename = sub("\\.mp4$", "", stimnopath)) %>%
+  select(video_filename, isfakeorreal)
+
+# Join to CMFTS features
+dta_cmfts_40_videos_AUs <- dta_cmfts_direct_au_features_imputed %>%
+  left_join(isfakeorreal_map, by = "video_filename")
+
+# Reorder cols
+dta_cmfts_40_videos_AUs <- dta_cmfts_40_videos_AUs %>%
+  select(video_filename, isfakeorreal, everything())
+```
+
+# 5. Preprocess Human Data
+
+Now the AU data is preprocessed and ready, it is time to preprocess the human judgement data.
+
+```{r preprocess-full-stim-PLD}
+dta_full_stim_clean <- dta_raw_full_stim %>%
+  select(participant_private_id, 
+         stimnopath, 
+         emotion_yes_no_new, 
+         isfake_or_real, 
+         dfs_fakeness_slider_response
+  ) %>%
+  rename(
+    participant_id = participant_private_id,
+    video_filename = stimnopath,
+    emotion = emotion_yes_no_new,
+    isfakeorreal = isfake_or_real
+  ) %>%
+  mutate(video_filename = sub("\\.mp4$", "", video_filename))
+
+# PLD
+dta_pld_clean <- dta_raw_pld %>%
+  select(participant_private_id, 
+         stimnopath, 
+         emotion_yes_no_new, 
+         isfake_or_real, 
+         dplf_fakeness_slider_response
+  ) %>%
+  rename(
+    participant_id = participant_private_id,
+    video_filename = stimnopath,
+    emotion = emotion_yes_no_new,
+    isfakeorreal = isfake_or_real
+  ) %>%
+  mutate(video_filename = sub("\\.mp4$", "", video_filename)) 
+```
+
+Save all files:
+
+```{r save-data}
+write.csv(dta_cmfts_40_videos_nmf, "Updated-Output/dta_cmfts_40_videos_nmf.csv", row.names = F)
+write.csv(dta_cmfts_40_videos_AUs, "Updated-Output/dta_cmfts_40_videos_AUs.csv", row.names = F)
+write.csv(dta_full_stim_clean, "Updated-Output/dta_full_stim_clean.csv", row.names = F)
+write.csv(dta_pld_clean, "Updated-Output/dta_pld_clean.csv", row.names = F)
+```
+
+Participant demographics:
+
+```{r}
+dta_raw_full_stim %>%
+  select(participant_private_id, dmg_age, dmg_gender) %>%
+  distinct()
+
+dta_raw_full_stim %>%
+  select(participant_private_id, dmg_age, dmg_gender) %>%
+  distinct() %>%
+  group_by(dmg_gender) %>%
+  summarise(
+    n_participants = n(),
+    mean_age = mean(dmg_age, na.rm=T),
+    sd_age = sd(dmg_age, na.rm=T),
+    min_age = min(dmg_age, na.rm=T),
+    max_age = max(dmg_age, na.rm=T)
+  )
+
+```

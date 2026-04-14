@@ -1,0 +1,6 @@
+"0",""
+"0","# Recheck overall proportion split eyes vs mouth"
+"0","aoi_summary_clean_corrected %>%"
+"0","  group_by(region_final) %>%"
+"0","  summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE)) %>%"
+"0","  mutate(relative_prop = mean_prop / sum(mean_prop))"

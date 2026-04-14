@@ -1,0 +1,6 @@
+"0","cluster_labels <- cluster_results_k2 %>%"
+"0","  group_by(stimnopath, cluster) %>%"
+"0","  summarise(cx = mean(mean_x), cy = mean(mean_y), .groups = ""drop"") %>%"
+"0","  group_by(stimnopath) %>%"
+"0","  mutate(region = if_else(cy == min(cy), ""eyes"", ""mouth"")) %>%"
+"0","  select(stimnopath, cluster, region)"

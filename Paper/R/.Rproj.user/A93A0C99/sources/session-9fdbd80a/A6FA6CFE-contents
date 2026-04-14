@@ -1,0 +1,449 @@
+---
+title: "Helio-Checks on Tims gaze analysis"
+author: "helio"
+date: "2026-02-13"
+output: html_document
+---
+
+# Filter to only the 40 matched stimuli
+
+# Corrected aggregation
+
+# Stimulus duration is 10 seconds = 10000ms
+
+STIM_DURATION_MS \<- 10000
+
+```{r}
+range(cluster_results_labelled)
+cluster_results_labelled%>%
+  group_by(ssid_bris_birm,stimnopath)%>%
+#   compute entropy for region_final which can take values like mouth, eyes and other
+# both statiponary and transotio entropy
+
+library(dplyr)
+
+# helpers
+library(dplyr)
+
+regions_all <- cluster_results_labelled %>%
+  distinct(region_final) %>%
+  arrange(region_final) %>%
+  pull(region_final)
+
+shannon_entropy <- function(p){
+  p <- p[p > 0]
+  -sum(p * log2(p))
+}
+
+stationary_entropy <- function(df, alpha = 0){
+  df <- as.data.frame(df)
+  counts <- table(factor(df$region_final, levels = regions_all))
+  counts_sm <- counts + alpha
+  probs <- counts_sm / sum(counts_sm)
+  shannon_entropy(probs)
+}
+
+transition_entropy <- function(df, order_col, alpha = 0){
+  df <- as.data.frame(df)
+
+  # order safely (base R)
+  o <- order(df[[order_col]])
+  df <- df[o, , drop = FALSE]
+
+  # build next state
+  next_region <- df$region_final[-1]
+  curr_region <- df$region_final[-nrow(df)]
+
+  if (length(curr_region) == 0) return(NA_real_)
+
+  # full KxK counts over the fixed state space
+  C <- table(
+    factor(curr_region, levels = regions_all),
+    factor(next_region, levels = regions_all)
+  )
+
+  # add-alpha smoothing (alpha=1 makes every transition possible)
+  C_sm <- C + alpha
+
+  out_sm <- rowSums(C_sm)
+  pi_sm  <- out_sm / sum(out_sm)
+
+  P_sm <- sweep(C_sm, 1, out_sm, "/")
+
+  H_rows <- apply(P_sm, 1, shannon_entropy)
+
+  sum(pi_sm * H_rows)
+}
+
+aoi_clust_entropy_results <- cluster_results_labelled %>%
+  group_by(ssid_bris_birm, stimnopath) %>%
+  summarise(
+    stat_entropy  = stationary_entropy(pick(everything()), alpha = 1),
+    trans_entropy = transition_entropy(pick(everything()), order_col = "order", alpha = 1),
+    .groups = "drop"
+  )
+
+aoi_clust_entropy_results%>%
+  ggplot(aes(stat_entropy,trans_entropy))+
+  geom_point()
+```
+
+```{r}
+
+aoi_summary_clean_corrected <- cluster_results_labelled %>%
+  # Filter to matched stimuli only
+  filter(stimnopath %in% unique(aoi_summary_clean$stimnopath)) %>%
+  # filter(region_final %in% c("eyes", "mouth")) %>%
+  group_by(ssid_bris_birm, stimnopath, region_final) %>%
+  summarise(
+    # Mean fixation duration per fixation event (should be ~200-400ms)
+    mean_fix_dur = mean(duration, na.rm = TRUE),
+    # Sum of fixation duration normalised by stimulus duration
+    prop_fix_dur = sum(duration, na.rm = TRUE) / STIM_DURATION_MS,
+    n_fixations = n(),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    dta_gaze_aggregated %>%
+      select(ssid_bris_birm, stimnopath, text, trial,
+             isfake_or_real,
+             dplf_bin_fake_1_real_0,
+             dplf_bin_fake_accuracy,
+             emotion_yes_no_new,
+              gaze_valid_prop,
+             gaze_valid_prop_ppt),
+    by = c("ssid_bris_birm", "stimnopath")
+  ) %>%
+  filter(!is.na(dplf_bin_fake_accuracy),
+         !is.na(emotion_yes_no_new))
+
+aoi_summary_clean_corrected
+aoi_summary_clean_corrected<- aoi_summary_clean_corrected%>%left_join(
+aoi_clust_entropy_results)
+
+# Sanity check - mean fixation duration should be ~200-400ms
+aoi_summary_clean_corrected %>%
+  summarise(
+    mean_fix_dur_overall = mean(mean_fix_dur, na.rm = TRUE),
+    median_fix_dur_overall = median(mean_fix_dur, na.rm = TRUE),
+    mean_prop = mean(prop_fix_dur, na.rm = TRUE)
+  )
+
+```
+
+Replot using proportion of fixation duration \# Accuracy
+
+```{r}
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           dplf_bin_fake_accuracy, emotion_yes_no_new) %>%
+  summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = factor(dplf_bin_fake_accuracy), y = mean_prop,
+             colour = region_final)) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  scale_x_discrete(labels = c("0" = "Incorrect", "1" = "Correct"),
+                   breaks = c("0", "1")) +
+  # labs(title = "Proportion of fixation time by region: accuracy",
+  #      x = "Accuracy",
+  #      y = "Proportion of stimulus duration fixating region",
+  #      colour = "Region") +
+  theme_minimal()
+
+# Ground truth
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           isfake_or_real, emotion_yes_no_new) %>%
+  summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = isfake_or_real, y = mean_prop, colour = region_final)) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  # labs(title = "Proportion of fixation time by region: ground truth",
+  #      x = "Ground truth",
+  #      y = "Proportion of stimulus duration fixating region",
+  #      colour = "Region") +
+  theme_minimal()
+
+# Participant response
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           dplf_bin_fake_1_real_0, emotion_yes_no_new) %>%
+  summarise_if(is.numeric, mean,na.rm = T)%>%
+  ungroup()%>%
+  # summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = factor(dplf_bin_fake_1_real_0), y = mean_fix_dur,
+             colour = region_final)) +
+  # geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  # scale_x_discrete(labels = c("0" = "Responded Real", "1" = "Responded Fake"),
+  #                  breaks = c("0", "1")) +
+  # labs(title = "Proportion of fixation time by region: participant response",
+  #      x = "Participant response",
+  #      y = "Proportion of stimulus duration fixating region",
+  #      colour = "Region") +
+  theme_minimal()
+
+
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           dplf_bin_fake_accuracy, emotion_yes_no_new) %>%
+  summarise_if(is.numeric, mean,na.rm = T)%>%
+  ungroup()%>%
+  # summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = factor(dplf_bin_fake_accuracy), y = mean_fix_dur,
+             colour = region_final)) +
+  # geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  # scale_x_discrete(labels = c("0" = "Responded Real", "1" = "Responded Fake"),
+                   # breaks = c("0", "1")) +
+  
+  theme_minimal()
+```
+
+entropy plots
+
+```{r}
+# accuracy
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm,           dplf_bin_fake_accuracy, emotion_yes_no_new) %>%
+summarise_if(is.numeric, mean,na.rm = T)%>%
+  ggplot(aes(x = factor(dplf_bin_fake_accuracy), y = stat_entropy)) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+
+  theme_minimal()
+
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm,           dplf_bin_fake_accuracy, emotion_yes_no_new) %>%
+summarise_if(is.numeric, mean,na.rm = T)%>%
+  ggplot(aes(x = factor(dplf_bin_fake_accuracy), y = trans_entropy)) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+
+  theme_minimal()
+
+# Ground truth
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm,           isfake_or_real, emotion_yes_no_new) %>%
+summarise_if(is.numeric, mean,na.rm = T)%>%
+  ggplot(aes(x = factor(isfake_or_real), y = stat_entropy)) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+
+  theme_minimal()
+
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm,           isfake_or_real, emotion_yes_no_new) %>%
+summarise_if(is.numeric, mean,na.rm = T)%>%
+  ggplot(aes(x = factor(isfake_or_real), y = log1p(trans_entropy+.1))) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+
+  theme_minimal()
+
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           isfake_or_real, emotion_yes_no_new) %>%
+  summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = isfake_or_real, y = mean_prop, colour = region_final)) +
+  geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  # labs(title = "Proportion of fixation time by region: ground truth",
+  #      x = "Ground truth",
+  #      y = "Proportion of stimulus duration fixating region",
+  #      colour = "Region") +
+  theme_minimal()
+
+# Participant response
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           dplf_bin_fake_1_real_0, emotion_yes_no_new) %>%
+  summarise_if(is.numeric, mean,na.rm = T)%>%
+  ungroup()%>%
+  # summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = factor(dplf_bin_fake_1_real_0), y = mean_fix_dur,
+             colour = region_final)) +
+  # geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  # scale_x_discrete(labels = c("0" = "Responded Real", "1" = "Responded Fake"),
+  #                  breaks = c("0", "1")) +
+  # labs(title = "Proportion of fixation time by region: participant response",
+  #      x = "Participant response",
+  #      y = "Proportion of stimulus duration fixating region",
+  #      colour = "Region") +
+  theme_minimal()
+
+
+aoi_summary_clean_corrected %>%
+  group_by(ssid_bris_birm, region_final,
+           dplf_bin_fake_accuracy, emotion_yes_no_new) %>%
+  summarise_if(is.numeric, mean,na.rm = T)%>%
+  ungroup()%>%
+  # summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = factor(dplf_bin_fake_accuracy), y = mean_fix_dur,
+             colour = region_final)) +
+  # geom_jitter(width = 0.1, alpha = 0.2) +
+  stat_summary(geom = "pointrange", fun.data = mean_se,
+               position = position_dodge(0.4)) +
+  facet_wrap(~emotion_yes_no_new,
+             labeller = labeller(emotion_yes_no_new = c("n" = "No Emotion",
+                                                         "y" = "Emotion"))) +
+  # scale_colour_manual(values = c("eyes" = "#F8766D", "mouth" = "#00BFC4")) +
+  # scale_x_discrete(labels = c("0" = "Responded Real", "1" = "Responded Fake"),
+                   # breaks = c("0", "1")) +
+  
+  theme_minimal()
+
+range(aoi_summary_clean_corrected$gaze_valid_prop)
+# 0.1473088 1.0000000 
+# this means. weare inclkuding trials where the data is just noise
+
+range(aoi_summary_clean_corrected$gaze_valid_prop_ppt)
+# [1] 0.09658639 1.00000000
+# thsi means we are using some paricpnats with completelyl invaliud data
+```
+
+first issue - when an aoi doesn occur in a trial, the value of fix dur should be zero, at the moment, there's just no value second issue- we need to explictelly exclude low quality gaze trial based on validity metrics
+
+before these below are re-done
+
+```{r}
+
+aoi_summary_clean_corrected
+lmm_results_corrected$eyes_accuracy <- lmer(
+  log1p(mean_fix_dur+.1) ~ dplf_bin_fake_accuracy * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "eyes")
+)
+
+anova(lmm_results_corrected$eyes_accuracy)
+
+
+lmm_results_corrected$eyes_groundtruth <- lmer(
+  log1p(prop_fix_dur+.1) ~ isfake_or_real * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "eyes")
+)
+
+anova(lmm_results_corrected$eyes_groundtruth )
+
+
+lmm_results_corrected$eyes_response <- lmer(
+  log1p(prop_fix_dur+.1) ~ dplf_bin_fake_1_real_0 * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "eyes")
+)
+
+anova(lmm_results_corrected$eyes_response)
+
+# Mouth
+lmm_results_corrected$mouth_accuracy_mean_fix <- lmer(
+  log1p(mean_fix_dur+.1) ~ dplf_bin_fake_accuracy * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "mouth")
+)
+
+anova(lmm_results_corrected$mouth_accuracy_mean_fix )
+
+lmm_results_corrected$mouth_accuracy <- lmer(
+  prop_fix_dur ~ dplf_bin_fake_accuracy * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "mouth")
+)
+
+lmm_results_corrected$mouth_groundtruth <- lmer(
+  prop_fix_dur ~ isfake_or_real * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "mouth")
+)
+
+lmm_results_corrected$mouth_response <- lmer(
+  prop_fix_dur ~ dplf_bin_fake_1_real_0 * emotion_yes_no_new +
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected %>% filter(region_final == "mouth")
+)
+
+lapply(lmm_results_corrected, anova)
+
+
+unique(aoi_summary_clean_corrected$region_final)
+
+
+lmm_results_corrected$accuracy_fixdur <- lmer(
+  log1p(mean_fix_dur+.1) ~ dplf_bin_fake_accuracy * emotion_yes_no_new *region_final+
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected%>%subset(region_final!= "other")
+)
+options(scipen = 999)
+anova(lmm_results_corrected$accuracy_fixdur)
+
+
+lmm_results_corrected$accuracy_prop_dur <- lmer(
+  log1p(prop_fix_dur+.1) ~ dplf_bin_fake_accuracy * emotion_yes_no_new *region_final+
+    (1|ssid_bris_birm) + (1|stimnopath),
+  REML = FALSE,
+  data = aoi_summary_clean_corrected%>%subset(region_final!= "other")
+)
+options(scipen = 999)
+
+anova(lmm_results_corrected$accuracy_prop_dur)
+
+
+anova(lmm_results_corrected$accuracy_prop_dur)
+
+
+```

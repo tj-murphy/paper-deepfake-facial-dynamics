@@ -1,0 +1,3 @@
+"0","# join entropy to complete AOI dataset"
+"0","aoi_complete <- aoi_complete %>%"
+"0","  left_join(aoi_clust_entropy_results, by = c(""ssid_bris_birm"", ""stimnopath""))"

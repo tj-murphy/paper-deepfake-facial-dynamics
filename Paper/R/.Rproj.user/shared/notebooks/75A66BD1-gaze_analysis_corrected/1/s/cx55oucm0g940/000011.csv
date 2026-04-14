@@ -1,0 +1,10 @@
+"0",""
+"0","cat(""\n=== Region proportions (with zeros) ===\n"")"
+"1","
+=== Region proportions (with zeros) ===
+"
+"0","aoi_complete %>%"
+"0","  group_by(region_final) %>%"
+"0","  summarise(mean_prop = mean(prop_fix_dur, na.rm = TRUE), .groups = ""drop"") %>%"
+"0","  mutate(relative = mean_prop / sum(mean_prop)) %>%"
+"0","  print()"

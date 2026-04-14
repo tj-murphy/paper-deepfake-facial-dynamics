@@ -1,0 +1,2682 @@
+---
+title: "final_analysis_NMF_check_valence_2"
+output:
+  pdf_document: default
+---
+
+# Introduction
+
+This script tests whether the face-swap deepfake process degrades the emotional valence signal in videos.
+
+Since real/fake detection performance is better in emotion videos, this suggests that deepfakes may alter or weaken emotional signals. By training a classifier on real videos only and then testing it on both real and fake videos separately, we can assess whether faceswap deepfakes preserve emotion informatin as well as real videos do.
+
+# Load Libraries & Data
+
+```{r}
+library(tidyverse)
+library(dplyr)
+```
+
+```{r}
+# Load data
+dta_preprocessed <- read.csv("../../CSV files/OpenFace files/full_dataset_preprocessed.csv")
+```
+
+# Smooth Raw AU Data
+
+```{r}
+dta_preprocessed_smth <- dta_preprocessed %>%
+  group_by(video_filename) %>%
+  mutate(across(contains("_r"), ~ zoo::rollmean(., k = 4, fill = "extend", align = "left"), .names = "smth_{col}")) %>%
+  ungroup()
+```
+
+Visualise differences:
+
+```{r, fig.width=5, fig.height=5}
+# Visualise difference
+dta_preprocessed_smth %>%
+  filter(video_filename == "20__exit_phone_room") %>%
+  select(frame, AU07_r, smth_AU07_r) %>%
+  pivot_longer(cols = c(AU07_r, smth_AU07_r), names_to = "Type", values_to = "Intensity") %>%
+  ggplot(aes(x = frame, y = Intensity, color = Type)) +
+  geom_line() +
+  labs(
+    title = "AU07 - Before vs. After Smoothing",
+    x = "Frame",
+    y = "AU Intensity"
+  ) +
+  theme_classic()
+```
+
+# Add Emotion & Valence Columns
+
+```{r}
+# Function to add emotion column
+add_emotion_column <- function(df) {
+  df %>%
+    mutate(
+      emotion = case_when(
+        str_detect(video_filename, "_laughing") ~ "yes",
+        str_detect(video_filename, "_happy") ~ "yes",
+        str_detect(video_filename, "_serious") ~ "yes",
+        str_detect(video_filename, "_angry") ~ "yes",
+        str_detect(video_filename, "_disgusted") ~ "yes",
+        TRUE ~ "no"
+      ),
+      emotion = factor(emotion, levels = c("yes", "no"))
+    )
+}
+
+add_emotion_type_column <- function(df) {
+  df %>%
+    mutate(
+      emotion_type = case_when(
+        str_detect(video_filename, "_laughing")  ~ "laughing",
+        str_detect(video_filename, "_happy")     ~ "happy",
+        str_detect(video_filename, "_serious")   ~ "serious",
+        str_detect(video_filename, "_angry")     ~ "angry",
+        str_detect(video_filename, "_disgusted") ~ "disgusted",
+        TRUE                                     ~ "neutral"
+      ),
+      
+      # Valence column
+      valence = case_when(
+        emotion_type %in% c("laughing", "happy") ~ "positive",
+        emotion_type %in% c("angry", "disgusted") ~ "negative",
+        emotion_type %in% c("serious", "neutral") ~ "neutral"
+      ),
+      
+      emotion_type = factor(emotion_type),
+      valence = factor(valence, levels = c("positive", "neutral", "negative"))
+    )
+}
+
+dta_nmf_input <- add_emotion_column(dta_preprocessed_smth)
+dta_nmf_input <- add_emotion_type_column(dta_nmf_input)
+
+# Reorder columns
+dta_nmf_input <- dta_nmf_input %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, emotion_type, valence, frame, everything())
+
+# Check order is correct
+colnames(dta_nmf_input)
+```
+
+# Split Data 80/20
+
+```{r}
+set.seed(12345)
+
+real_videos <- dta_nmf_input %>%
+  filter(isfakeorreal == "real") %>%
+  distinct(video_filename)
+
+# Sample 80% of real videos for train set
+train_real_videos <- sample(real_videos$video_filename,
+                            size = floor(0.8 * nrow(real_videos)))
+
+# Get corresponding fake videos for selected real videos
+train_fake_videos <- dta_nmf_input %>%
+  filter(video_filename %in% train_real_videos) %>%
+  pull(corresponding_video) %>%
+  unique()
+
+# Train set
+dta_nmf_input_train <- dta_nmf_input %>%
+  filter(video_filename %in% c(train_real_videos, train_fake_videos))
+
+# Test set is everything else
+dta_nmf_input_test <- dta_nmf_input %>%
+  filter(!video_filename %in% c(train_real_videos, train_fake_videos))
+
+# Check distribution
+cat(sprintf("Training set: %d videos\n", length(unique(dta_nmf_input_train$video_filename))))
+cat(sprintf("Test set: %d videos\n", length(unique(dta_nmf_input_test$video_filename))))
+
+# Check pairs are preserved
+train_videos <- unique(dta_nmf_input_train$video_filename)
+test_videos <- unique(dta_nmf_input_test$video_filename)
+
+train_corresponding_videos <- dta_nmf_input %>%
+  filter(video_filename %in% train_videos) %>%
+  pull(corresponding_video) %>%
+  unique()
+
+if (length(intersect(train_corresponding_videos, test_videos)) == 0) {
+  cat("Success: Pairs are preserved.\n")
+} else {
+  cat("Error, the following pairs were split:\n")
+  print(intersect(train_corresponding_videos, test_videos))
+}
+```
+
+# Check Class Distribution
+
+```{r}
+# Valence distribution in train set
+cat("Training set valence distribution:\n")
+dta_nmf_input_train %>%
+  distinct(video_filename, valence) %>%
+  count(valence) %>%
+  view()
+
+# Valence distribution in test set
+cat("\nTest set valence distribution:\n")
+dta_nmf_input_test %>%
+  distinct(video_filename, valence) %>%
+  count(valence) %>%
+  view()
+```
+
+Train set:
+
+|          |     |
+|----------|-----|
+| positive | 144 |
+| neutral  | 154 |
+| negative | 72  |
+
+Test set:
+
+|          |     |
+|----------|-----|
+| positive | 32  |
+| neutral  | 38  |
+| negative | 24  |
+
+There is an imbalance between positive/neutral and negative videos, although it should be fine considering the classifiers like RF are built to deal with imbalance like this.
+
+# Normalisation
+
+```{r}
+au_cols <- names(dta_nmf_input_train)[grepl("^smth_AU", names(dta_nmf_input_train))]
+
+# Learn scaling params from train set only
+norm_params <- list()
+for (col in au_cols) {
+  mean_val <- mean(dta_nmf_input_train[[col]], na.rm = TRUE)
+  sd_val <- sd(dta_nmf_input_train[[col]], na.rm = TRUE)
+  
+  # Handle AUs with zero SD
+  if (is.na(sd_val) || sd_val == 0) {
+    sd_val <- 1
+  }
+  
+  norm_params[[col]] <- c(mean = mean_val, sd = sd_val)
+}
+
+# Function to apply z-score and non-negative shift
+fn_z_score_shift <- function(x, mean_val, sd_val) {
+  z <- (x - mean_val) / sd_val
+  # Shift for non-negativity
+  z_shifted <- z - min(z, na.rm = TRUE)
+  z_shifted[is.na(z_shifted)] <- 0
+  return(z_shifted)
+}
+
+# Apply to train set
+for (col in au_cols) {
+  params <- norm_params[[col]]
+  dta_nmf_input_train[[col]] <- fn_z_score_shift(
+    dta_nmf_input_train[[col]], 
+    params["mean"], 
+    params["sd"]
+  )
+}
+
+# Apply to test set
+for (col in au_cols) {
+  params <- norm_params[[col]]
+  dta_nmf_input_test[[col]] <- fn_z_score_shift(
+    dta_nmf_input_test[[col]], 
+    params["mean"], 
+    params["sd"]
+  )
+}
+
+cat("Normalisation complete.\n")
+```
+
+Now to clean the columns:
+
+```{r}
+head(dta_nmf_input_train)
+
+dta_nmf_input_train <- dta_nmf_input_train %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, valence, frame, starts_with("smth_")) %>%
+  rename(
+    AU01_inner_brow_raiser = smth_AU01_r,
+    AU02_outer_brow_raiser = smth_AU02_r,
+    AU04_brow_lowerer = smth_AU04_r,
+    AU05_upper_lid_raiser = smth_AU05_r,
+    AU06_cheek_raiser = smth_AU06_r,
+    AU07_lid_tightener = smth_AU07_r,
+    AU09_nose_wrinkler = smth_AU09_r,
+    AU10_upper_lip_raiser = smth_AU10_r,
+    AU12_lip_corner_puller = smth_AU12_r,
+    AU14_dimpler = smth_AU14_r,
+    AU15_lip_corner_depressor = smth_AU15_r,
+    AU17_chin_raiser = smth_AU17_r,
+    AU20_lip_stretcher = smth_AU20_r,
+    AU23_lip_tightener = smth_AU23_r,
+    AU25_lips_part = smth_AU25_r,
+    AU26_jaw_drop = smth_AU26_r,
+    AU45_blink = smth_AU45_r
+  )
+
+# Do same for test
+dta_nmf_input_test <- dta_nmf_input_test %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, valence, frame, starts_with("smth_")) %>%
+  rename(
+    AU01_inner_brow_raiser = smth_AU01_r,
+    AU02_outer_brow_raiser = smth_AU02_r,
+    AU04_brow_lowerer = smth_AU04_r,
+    AU05_upper_lid_raiser = smth_AU05_r,
+    AU06_cheek_raiser = smth_AU06_r,
+    AU07_lid_tightener = smth_AU07_r,
+    AU09_nose_wrinkler = smth_AU09_r,
+    AU10_upper_lip_raiser = smth_AU10_r,
+    AU12_lip_corner_puller = smth_AU12_r,
+    AU14_dimpler = smth_AU14_r,
+    AU15_lip_corner_depressor = smth_AU15_r,
+    AU17_chin_raiser = smth_AU17_r,
+    AU20_lip_stretcher = smth_AU20_r,
+    AU23_lip_tightener = smth_AU23_r,
+    AU25_lips_part = smth_AU25_r,
+    AU26_jaw_drop = smth_AU26_r,
+    AU45_blink = smth_AU45_r
+  )
+```
+
+# NMF on Training Data
+
+```{r}
+au_cols <- names(dta_nmf_input_train)[grepl("^AU", names(dta_nmf_input_train))]
+
+# Prepare data matrix for NMF (train set only)
+V_train <- dta_nmf_input_train %>%
+  select(all_of(au_cols)) %>%
+  as.matrix() %>%
+  t()  # Transpose to have AUs as rows, frames as columns
+
+model_nmf <- RcppML::nmf(V_train, 
+                         k = 3, 
+                         tol = 1e-6, 
+                         maxit = 750, 
+                         verbose = TRUE)
+
+
+# Extract H, W, and scaling vector D
+H <- model_nmf$h
+W_train <- model_nmf$w
+D <- model_nmf$d
+
+# Scale H matrix using d scaling vector
+H_train <- sweep(H, 1, D, "*")
+
+# Transpose H matrix to get correct row order
+dta_h_matrix <- as.data.frame(t(H_train))
+
+# Change column names
+colnames(dta_h_matrix) <- paste0("nmf", 1:ncol(dta_h_matrix))
+
+# Check row order in h_df matches row order in metadata
+if(nrow(dta_h_matrix) != nrow(dta_nmf_input_train[, 2:8])) {
+  stop("Number of samples in H matrix does not match number of rows in the metadata.")
+}
+
+# Add h to dta_nmf_input
+dta_nmf_output <- dta_nmf_input_train %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, valence, frame) %>%
+  bind_cols(dta_h_matrix)
+
+cat("NMF training complete.\n")
+cat("Basis matrix (W) dimensions:", dim(W_train), "\n")
+cat("Coefficient matrix (H) dimensions:", dim(H_train), "\n")
+
+
+
+# Visualise basis matrix
+au_names <- colnames(dta_nmf_input_train %>% select(all_of(au_cols)))
+rownames(W_train) <- au_names
+```
+
+Visualise:
+
+```{r}
+# Function for min-max normalisation, used in visualisations
+fn_maxnormalise <- function(x, ...) {
+  rng <- range(x, na.rm = TRUE)
+  if (anyNA(rng) || diff(rng) == 0) {
+    return(rep(0, length(x)))  # safe fallback: all 0s
+  } else {
+    return((x - rng[1]) / diff(rng))
+  }
+}
+```
+
+Basis matrix:
+
+```{r}
+library(RColorBrewer)
+
+# Basis matrix
+NMF::aheatmap(
+  W_train, 
+  main = "Basis Matrix (W)", 
+  color = colorRampPalette(brewer.pal(6, "Blues"))(100), 
+  Rowv = NA, Colv = NA
+)
+# Normalise across rows for comparison
+# Group by component for normalisation
+NMF::aheatmap(
+  apply(W_train, 2, fn_maxnormalise), 
+  main = "Basis Matrix (W) - Normalised", 
+  color = colorRampPalette(brewer.pal(6, "Blues"))(100), 
+  scale = "none", 
+  Rowv = NA, Colv = NA
+)
+apply(W_train, 2, fn_maxnormalise)
+```
+
+# Project NMF onto Test Data
+
+```{r}
+library(Matrix)
+library(nnls)
+
+# 1. Extract scaled basis matrix from model
+project_W_train_raw <- model_nmf$w
+project_d_train <- as.numeric(model_nmf$d)
+project_W_train <- as.matrix(project_W_train_raw %*% Diagonal(x = project_d_train))
+
+cat("Basis matrix dimensions (W * D):", dim(project_W_train), "\n")
+
+# 2. Set up loop to project each video
+# Empty list to store final activation matrices
+project_activations_list <- list()
+
+for (video_name in unique(dta_nmf_input_test$video_filename)) {
+  # Prepare matrix for current video
+  project_V_new <- dta_nmf_input_test %>%
+    filter(video_filename == video_name) %>%
+    select(all_of(au_cols)) %>%  # Use au_cols to match training
+    as.matrix()
+  
+  # Transpose so that features are rows and frames are columns
+  project_v_new <- t(project_V_new)
+  
+  # Set up variables for inner NNLS loop
+  project_k <- ncol(project_W_train)
+  project_n_new <- ncol(project_v_new)
+  project_h_new <- matrix(NA_real_, nrow = project_k, ncol = project_n_new)
+  
+  # Project each frame using NNLS
+  for (i in seq_len(project_n_new)) {
+    project_h_new[, i] <- nnls(project_W_train, project_v_new[, i])$x
+  }
+  
+  # Apply scaling to projected H matrix
+  project_h_new_scaled <- sweep(project_h_new, 1, project_d_train, "*")
+  
+  # Transpose final activation matrix so it's frames x components
+  project_h_new_transposed <- t(project_h_new_scaled)
+  
+  # Store result in list
+  project_activations_list[[video_name]] <- project_h_new_transposed
+}
+
+cat("Projection complete.\n")
+cat(paste("The list now contains", length(project_activations_list), "activation matrices.\n\n"))
+cat("Dimensions of activation matrix for first video (frames x components):\n")
+print(dim(project_activations_list[[1]]))
+
+# 3. Combine all projected activations
+project_H_new <- do.call(rbind, project_activations_list)
+
+cat("\nTotal projected H matrix dimensions:", dim(project_H_new), "\n")
+
+# 4. Optional: Validate reconstruction quality
+project_V_orig <- dta_nmf_input_test %>%
+  select(all_of(au_cols)) %>%
+  as.matrix()
+
+# Reconstruct using unscaled W (since H is already scaled)
+project_V_recon <- project_H_new %*% t(model_nmf$w)
+
+# Calculate R squared
+project_r2_validation <- 1 - sum((project_V_orig - project_V_recon)^2) / 
+                             sum((project_V_orig - mean(project_V_orig))^2)
+cat(sprintf("\nReconstruction R² for entire test set: %.4f\n", project_r2_validation))
+
+# 5. Create final test output with NMF components
+dta_h_matrix_test <- as.data.frame(project_H_new)
+colnames(dta_h_matrix_test) <- paste0("nmf", 1:ncol(dta_h_matrix_test))
+
+# Check dimensions match
+if(nrow(dta_h_matrix_test) != nrow(dta_nmf_input_test)) {
+  stop("Number of samples in H_test matrix does not match number of rows in test metadata.")
+}
+
+# Add metadata
+dta_nmf_output_test <- dta_nmf_input_test %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, 
+         emotion, valence, frame) %>%
+  bind_cols(dta_h_matrix_test)
+
+cat("\nTest output dimensions:", dim(dta_nmf_output_test), "\n")
+head(dta_nmf_output_test)
+```
+
+R2 reconstruction: 0.4451
+
+# CMFTS Feature Extraction
+
+```{r}
+# Install dependencies
+#devtools::install_github("cbergmeir/tsExpKit")
+
+# Install CMFTS package (uncomment if first run)
+#devtools::install_github("fjbaldan/CMFTS")
+```
+
+## Train
+
+```{r}
+dta_cmfts_input <- dta_nmf_output %>%
+  select(video_filename, isfakeorreal, emotion, valence, frame, nmf1, nmf2, nmf3) %>%
+  pivot_longer(cols = c("nmf1", "nmf2", "nmf3"),
+               names_to = "component",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_input), value = TRUE)
+
+head(dta_cmfts_input)
+```
+
+```{r}
+# Function for calculating CMFTS features
+fn_extract_cmfts_features <- function(ts_values) {
+  ts_matrix <- matrix(as.numeric(ts_values), nrow = 1)
+  cmfts_features <- cmfts::cmfts(dataset = ts_matrix)
+  return(cmfts_features)
+}
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_output <- apply(
+  dta_cmfts_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_input[, c("video_filename", "isfakeorreal", "emotion", "valence", "component")],
+    .
+  )
+
+head(dta_cmfts_output)
+```
+
+Preprocessing:
+
+```{r}
+dta_cmfts_output_concat <- dta_cmfts_output %>%
+  pivot_wider(
+    names_from = component,
+    values_from = -c(video_filename, component),
+    names_glue = "{.value}_{component}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -3:-6]
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -5:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_output_concat)[3] <- c("emotion")
+colnames(dta_cmfts_output_concat)[4] <- c("valence")
+
+head(dta_cmfts_output_concat)
+```
+
+Missing values:
+
+```{r}
+dta_cmfts_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+Remove permutation_entropy columns:
+
+```{r}
+# Drop permutation entropy columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat %>%
+  select(-starts_with("permutation_entropy"))
+```
+
+Infinite values:
+
+```{r}
+dta_cmfts_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Impute with missForest:
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_output_concat)) {
+  dta_cmfts_output_concat[[col]][is.infinite(dta_cmfts_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_output_imputed <- dta_cmfts_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_output_imputed[, sapply(dta_cmfts_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE: 7.162083e-11
+
+Features with zero SD:
+
+```{r}
+sds_train <- sapply(dta_cmfts_output_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+features_to_keep <- names(sds_train)[is.na(sds_train) | sds_train > 0]
+
+# Drop features with zero SD
+dta_cmfts_output_imputed_zerosd <- dta_cmfts_output_imputed[, features_to_keep]
+```
+
+## Test
+
+```{r}
+dta_cmfts_test_input <- dta_nmf_output_test %>%
+  select(video_filename, isfakeorreal, emotion, valence, frame, nmf1, nmf2, nmf3) %>%
+  pivot_longer(cols = c("nmf1", "nmf2", "nmf3"),
+               names_to = "component",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_test_input), value = TRUE)
+
+head(dta_cmfts_test_input)
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_test_output <- apply(
+  dta_cmfts_test_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_test_input[, c("video_filename", "isfakeorreal", "emotion", "valence", "component")],
+    .
+  )
+
+head(dta_cmfts_test_output)
+```
+
+Preprocessing:
+
+```{r}
+dta_cmfts_test_output_concat <- dta_cmfts_test_output %>%
+  pivot_wider(
+    names_from = component,
+    values_from = -c(video_filename, component),
+    names_glue = "{.value}_{component}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -3:-6]
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -5:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_test_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_test_output_concat)[3] <- c("emotion")
+colnames(dta_cmfts_test_output_concat)[4] <- c("valence")
+
+head(dta_cmfts_test_output_concat)
+```
+
+Missing values:
+
+```{r}
+dta_cmfts_test_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+Remove permutation entropy:
+
+```{r}
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat %>%
+  select(-starts_with("permutation_entropy"))
+```
+
+Infinite values:
+
+```{r}
+dta_cmfts_test_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Impute with missForest:
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_test_output_concat)) {
+  dta_cmfts_test_output_concat[[col]][is.infinite(dta_cmfts_test_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_test_output_imputed <- dta_cmfts_test_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_test_output_imputed[, sapply(dta_cmfts_test_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_test_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE: 0.003895
+
+Features with zero SD:
+
+```{r}
+# Drop features with zero SD
+dta_cmfts_test_output_imputed_zerosd <- dta_cmfts_test_output_imputed[, features_to_keep]
+```
+
+# Feature Selection
+
+```{r, fig.height=8, fig.width=10}
+set.seed(12345)
+
+# Create a subset of data including only the outcome and predictors
+boruta_train_zsd <- dta_cmfts_output_imputed_zerosd[, c("valence",
+                                                        names(dta_cmfts_output_imputed_zerosd)[5:115])]
+
+# Make sure outcome variable is factor
+boruta_train_zsd$valence <- as.factor(boruta_train_zsd$valence)
+
+# Boruta
+boruta_output_zsd <- Boruta::Boruta(valence ~ ., data = boruta_train_zsd, doTrace = 2)
+
+# Output
+# print(boruta_output_zsd)
+# plot(boruta_output_zsd, las = 2)
+
+# Solve tentative features
+Boruta::TentativeRoughFix(boruta_output_zsd)
+
+# Output
+print(boruta_output_zsd)
+par(mar = c(12, 4, 4, 2) + 0.1)
+plot(Boruta::TentativeRoughFix(boruta_output_zsd), las = 2)
+
+# Solve tentative features
+Boruta::TentativeRoughFix(boruta_output_zsd)
+
+# get only important features
+print(Boruta::getSelectedAttributes(boruta_output_zsd, withTentative = F))
+
+# ranked
+# 1. Get statistics for all attributes, including their median importance
+feature_stats <- Boruta::attStats(boruta_output_zsd)
+
+# 2. Add the feature names as a column to the data frame
+feature_stats$features <- rownames(feature_stats)
+
+# 3. Filter for only "Confirmed" features and sort by importance (descending)
+ranked_features <- feature_stats %>%
+  #dplyr::filter(decision == "Confirmed") %>%
+  dplyr::arrange(desc(medianImp))
+
+# Print the ranked table
+print(ranked_features)
+
+# To get just a vector of the ranked feature names:
+ranked_feature_names <- ranked_features$features
+print(ranked_feature_names)
+```
+
+53 features confirmed important for classifying valence.
+
+1.  shannon_entropy_CS_nmf1
+2.  shannon_entropy_CS_nmf3
+3.  shannon_entropy_SG_nmf2
+4.  shannon_entropy_SG_nmf3
+5.  linearity_nmf3
+
+# Analysis 1: Train on All Data (Real + Fake)
+
+```{r}
+cat("\n=== ANALYSIS 1: Training on ALL data (Real + Fake) ===\n\n")
+
+# Get the confirmed important features (first 53 from ranked_feature_names)
+important_features <- ranked_feature_names[1:53]
+
+cat("Using", length(important_features), "confirmed important features\n\n")
+
+# Prepare training data with selected features
+dta_classifier_train_all <- dta_cmfts_output_imputed_zerosd %>%
+  select(video_filename, isfakeorreal, valence, all_of(important_features))
+
+# Prepare test data with same features
+dta_classifier_test_all <- dta_cmfts_test_output_imputed_zerosd %>%
+  select(video_filename, isfakeorreal, valence, all_of(important_features))
+
+# Ensure valence is a factor with same levels
+dta_classifier_train_all$valence <- factor(dta_classifier_train_all$valence, 
+                                           levels = c("positive", "neutral", "negative"))
+dta_classifier_test_all$valence <- factor(dta_classifier_test_all$valence, 
+                                          levels = c("positive", "neutral", "negative"))
+
+# Create separate test subsets for real and fake videos
+test_real <- dta_classifier_test_all %>% filter(isfakeorreal == "real")
+test_fake <- dta_classifier_test_all %>% filter(isfakeorreal == "fake")
+
+cat("Training set:", nrow(dta_classifier_train_all), "videos\n")
+cat("Test set (total):", nrow(dta_classifier_test_all), "videos\n")
+cat("  - Real videos:", nrow(test_real), "\n")
+cat("  - Fake videos:", nrow(test_fake), "\n\n")
+
+# Check class distribution
+cat("Training set valence distribution:\n")
+print(table(dta_classifier_train_all$valence))
+
+cat("\nTest set valence distribution (Real):\n")
+print(table(test_real$valence))
+
+cat("\nTest set valence distribution (Fake):\n")
+print(table(test_fake$valence))
+```
+
+## Random Forest
+
+```{r}
+library(caret)
+
+# Setup cross-validation
+classifier_control_cv <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(12345)
+
+# Train Random Forest
+cat("\n--- Training Random Forest ---\n")
+rf_all <- train(
+  valence ~ .,
+  data = dta_classifier_train_all[, -c(1:2)],  # Remove video_filename and isfakeorreal
+  method = "rf",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneLength = 5,
+  importance = TRUE
+)
+
+cat("\nRandom Forest (All Data) - CV Results:\n")
+print(rf_all)
+
+# Feature importance
+cat("\nTop 10 most important features:\n")
+rf_importance <- varImp(rf_all)
+print(rf_importance, top = 10)
+```
+
+Evaluate on test data:
+
+```{r}
+rf_all_test_pred <- predict(rf_all, newdata = dta_classifier_test_all)
+rf_all_test_performance <- confusionMatrix(
+  data = rf_all_test_pred,
+  reference = dta_classifier_test_all$valence
+)
+
+cat("\nRandom Forest (All Data) - Full Test Set:\n")
+print(rf_all_test_performance)
+
+# Evaluate separately on real test videos
+rf_all_real_pred <- predict(rf_all, newdata = test_real)
+rf_all_real_performance <- confusionMatrix(
+  data = rf_all_real_pred,
+  reference = test_real$valence
+)
+
+cat("\nRandom Forest (All Data) - Real Test Videos:\n")
+print(rf_all_real_performance)
+
+# Evaluate separately on fake test videos
+rf_all_fake_pred <- predict(rf_all, newdata = test_fake)
+rf_all_fake_performance <- confusionMatrix(
+  data = rf_all_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nRandom Forest (All Data) - Fake Test Videos:\n")
+print(rf_all_fake_performance)
+
+# Calculate performance difference
+rf_all_diff <- rf_all_real_performance$overall["Accuracy"] - 
+               rf_all_fake_performance$overall["Accuracy"]
+cat("\nPerformance difference (Real - Fake):", round(rf_all_diff * 100, 2), "%\n")
+```
+
+Tables:
+
+```{r}
+# --- Table: RF (All Data) - Summary Metrics ---
+rf_all_summary_table <- data.frame(
+  Subset = c("Real Test", "Fake Test"),
+  Accuracy = c(
+    rf_all_real_performance$overall["Accuracy"],
+    rf_all_fake_performance$overall["Accuracy"]
+  ),
+  Accuracy_95CI_Lower = c(
+    rf_all_real_performance$overall["AccuracyLower"],
+    rf_all_fake_performance$overall["AccuracyLower"]
+  ),
+  Accuracy_95CI_Upper = c(
+    rf_all_real_performance$overall["AccuracyUpper"],
+    rf_all_fake_performance$overall["AccuracyUpper"]
+  ),
+  Kappa = c(
+    rf_all_real_performance$overall["Kappa"],
+    rf_all_fake_performance$overall["Kappa"]
+  ),
+  Sensitivity_Positive = c(
+    rf_all_real_performance$byClass["Class: positive", "Sensitivity"],
+    rf_all_fake_performance$byClass["Class: positive", "Sensitivity"]
+  ),
+  Sensitivity_Neutral = c(
+    rf_all_real_performance$byClass["Class: neutral", "Sensitivity"],
+    rf_all_fake_performance$byClass["Class: neutral", "Sensitivity"]
+  ),
+  Sensitivity_Negative = c(
+    rf_all_real_performance$byClass["Class: negative", "Sensitivity"],
+    rf_all_fake_performance$byClass["Class: negative", "Sensitivity"]
+  ),
+  Specificity_Positive = c(
+    rf_all_real_performance$byClass["Class: positive", "Specificity"],
+    rf_all_fake_performance$byClass["Class: positive", "Specificity"]
+  ),
+  Specificity_Neutral = c(
+    rf_all_real_performance$byClass["Class: neutral", "Specificity"],
+    rf_all_fake_performance$byClass["Class: neutral", "Specificity"]
+  ),
+  Specificity_Negative = c(
+    rf_all_real_performance$byClass["Class: negative", "Specificity"],
+    rf_all_fake_performance$byClass["Class: negative", "Specificity"]
+  )
+)
+
+cat("\n=== Random Forest (All Data) - Summary Table ===\n")
+print(rf_all_summary_table, row.names = FALSE)
+```
+
+## C5.0B
+
+```{r}
+set.seed(12345)
+
+# Train C5.0 with boosting
+cat("\n--- Training C5.0 Boosted Trees ---\n")
+c50_all <- train(
+  valence ~ .,
+  data = dta_classifier_train_all[, -c(1:2)],
+  method = "C5.0",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneGrid = expand.grid(
+    trials = c(1, 10, 20, 30),
+    model = "tree",
+    winnow = FALSE
+  )
+)
+
+cat("\nC5.0 Boosted (All Data) - CV Results:\n")
+print(c50_all)
+```
+
+Evaluate on test data:
+
+```{r}
+c50_all_test_pred <- predict(c50_all, newdata = dta_classifier_test_all)
+c50_all_test_performance <- confusionMatrix(
+  data = c50_all_test_pred,
+  reference = dta_classifier_test_all$valence
+)
+
+c50_all_real_pred <- predict(c50_all, newdata = test_real)
+c50_all_real_performance <- confusionMatrix(
+  data = c50_all_real_pred,
+  reference = test_real$valence
+)
+
+c50_all_fake_pred <- predict(c50_all, newdata = test_fake)
+c50_all_fake_performance <- confusionMatrix(
+  data = c50_all_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nC5.0 Boosted (All Data) - Full Test Set:\n")
+print(c50_all_test_performance)
+
+cat("\nC5.0 Boosted (All Data) - Real Test Videos:\n")
+print(c50_all_real_performance)
+
+cat("\nC5.0 Boosted (All Data) - Fake Test Videos:\n")
+print(c50_all_fake_performance)
+
+c50_all_diff <- c50_all_real_performance$overall["Accuracy"] - 
+                c50_all_fake_performance$overall["Accuracy"]
+cat("\nPerformance difference (Real - Fake):", round(c50_all_diff * 100, 2), "%\n")
+```
+
+## SVM
+
+```{r}
+set.seed(12345)
+
+# Train SVM
+cat("\n--- Training SVM ---\n")
+svm_all <- train(
+  valence ~ .,
+  data = dta_classifier_train_all[, -c(1:2)],
+  method = "svmRadial",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneLength = 5,
+  preProcess = c("center", "scale")  # SVM benefits from scaling
+)
+
+cat("\nSVM (All Data) - CV Results:\n")
+print(svm_all)
+```
+
+Evaluate on test data:
+
+```{r}
+svm_all_test_pred <- predict(svm_all, newdata = dta_classifier_test_all)
+svm_all_test_performance <- confusionMatrix(
+  data = svm_all_test_pred,
+  reference = dta_classifier_test_all$valence
+)
+
+svm_all_real_pred <- predict(svm_all, newdata = test_real)
+svm_all_real_performance <- confusionMatrix(
+  data = svm_all_real_pred,
+  reference = test_real$valence
+)
+
+svm_all_fake_pred <- predict(svm_all, newdata = test_fake)
+svm_all_fake_performance <- confusionMatrix(
+  data = svm_all_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nSVM (All Data) - Full Test Set:\n")
+print(svm_all_test_performance)
+
+cat("\nSVM (All Data) - Real Test Videos:\n")
+print(svm_all_real_performance)
+
+cat("\nSVM (All Data) - Fake Test Videos:\n")
+print(svm_all_fake_performance)
+
+svm_all_diff <- svm_all_real_performance$overall["Accuracy"] - 
+                svm_all_fake_performance$overall["Accuracy"]
+cat("\nPerformance difference (Real - Fake):", round(svm_all_diff * 100, 2), "%\n")
+```
+
+## Logistic Regression
+
+```{r}
+set.seed(12345)
+
+# Train Logistic Regression (multinomial for 3 classes)
+cat("\n--- Training Logistic Regression ---\n")
+lr_all <- train(
+  valence ~ .,
+  data = dta_classifier_train_all[, -c(1:2)],
+  method = "multinom",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  trace = FALSE,
+  MaxNWts = 5000  # Increase if needed for many features
+)
+
+cat("\nLogistic Regression (All Data) - CV Results:\n")
+print(lr_all)
+```
+
+Evaluate on test data:
+
+```{r}
+lr_all_test_pred <- predict(lr_all, newdata = dta_classifier_test_all)
+lr_all_test_performance <- confusionMatrix(
+  data = lr_all_test_pred,
+  reference = dta_classifier_test_all$valence
+)
+
+lr_all_real_pred <- predict(lr_all, newdata = test_real)
+lr_all_real_performance <- confusionMatrix(
+  data = lr_all_real_pred,
+  reference = test_real$valence
+)
+
+lr_all_fake_pred <- predict(lr_all, newdata = test_fake)
+lr_all_fake_performance <- confusionMatrix(
+  data = lr_all_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nLogistic Regression (All Data) - Full Test Set:\n")
+print(lr_all_test_performance)
+
+cat("\nLogistic Regression (All Data) - Real Test Videos:\n")
+print(lr_all_real_performance)
+
+cat("\nLogistic Regression (All Data) - Fake Test Videos:\n")
+print(lr_all_fake_performance)
+
+lr_all_diff <- lr_all_real_performance$overall["Accuracy"] - 
+               lr_all_fake_performance$overall["Accuracy"]
+cat("\nPerformance difference (Real - Fake):", round(lr_all_diff * 100, 2), "%\n")
+```
+
+Overall findings:
+
+-   All models perform significantly above chance on all test sets.
+
+-   There is consistent performance drop on fake videos across most models:
+
+    -   RF: 14.89% drop (70.2% to 55.3%)
+
+    -   SVM: 14.89% drop (72.3% to 57.5%)
+
+    -   C5.0B: 6.38% drop (68.1% to 61.7%)
+
+    -   LR: 4.26% drop (66% to 61.7%)
+
+-   Average drop is around 10%, which is substantial.
+
+-   Models can classify valence using NMF components - NMF captures meaningful emotional information. So the NMF approach isn't fundamentally broken due to poor performances on classifying real vs fake.
+
+-   Models perform worse on fake videos when trained on both real and fake videos. Even with fake videos in the training data, they are harder to classify, suggesting emotional signals may be degraded in fakes.
+
+-   Negative valence class is severely impacted - they are hardest to classify, especially in fakes. We see this in the low sensitivity for the negative class. This could be due to imbalanced classes.
+
+-   Neutral class had best performance, perhaps because neutral expressions may be easier for deepfakes to maintain.
+
+-   Positive class had second best performance.
+
+-   The negative class is underrepresented but both real and fake test subsets have the same proportion of negative videos.
+
+Table:
+
+```{r}
+# === ANALYSIS 1: Calculate Additional Metrics ===
+
+library(pROC)
+library(mltools)
+
+# Function to calculate MCC from confusion matrix
+calc_mcc <- function(cm) {
+  # For multiclass, use mltools::mcc if available, otherwise calculate manually
+  conf_mat <- as.matrix(cm$table)
+  n <- sum(conf_mat)
+  correct <- sum(diag(conf_mat))
+  
+  # Matthews correlation coefficient for multiclass
+  # Using the generalized formula
+  c <- sum(diag(conf_mat))  # total correct
+  s <- n  # total samples
+  
+  # Sum of true positives for each class times sum of other classes
+  pk <- rowSums(conf_mat)  # predicted counts per class
+  tk <- colSums(conf_mat)  # true counts per class
+  
+  # Multiclass MCC formula
+  cov_xy <- c * s - sum(pk * tk)
+  cov_xx <- s^2 - sum(pk^2)
+  cov_yy <- s^2 - sum(tk^2)
+  
+  if (cov_xx == 0 | cov_yy == 0) {
+    return(0)
+  }
+  
+  mcc <- cov_xy / sqrt(cov_xx * cov_yy)
+  return(mcc)
+}
+
+# Function to calculate multiclass AUC (requires class probabilities)
+calc_multiclass_auc <- function(model, newdata, reference) {
+  # Get class probabilities
+  probs <- predict(model, newdata = newdata, type = "prob")
+  
+  # Calculate AUC for each class (one-vs-rest)
+  auc_values <- sapply(levels(reference), function(class) {
+    binary_ref <- ifelse(reference == class, 1, 0)
+    if (length(unique(binary_ref)) < 2) return(NA)
+    roc_obj <- pROC::roc(binary_ref, probs[[class]], quiet = TRUE)
+    pROC::auc(roc_obj)
+  })
+  
+  # Return macro-averaged AUC
+  mean(auc_values, na.rm = TRUE)
+}
+
+# Calculate metrics for Analysis 1
+# RF - Real
+rf_all_real_mcc <- calc_mcc(rf_all_real_performance)
+rf_all_real_auc <- calc_multiclass_auc(rf_all, test_real, test_real$valence)
+
+# RF - Fake
+rf_all_fake_mcc <- calc_mcc(rf_all_fake_performance)
+rf_all_fake_auc <- calc_multiclass_auc(rf_all, test_fake, test_fake$valence)
+
+# C5.0 - Real
+c50_all_real_mcc <- calc_mcc(c50_all_real_performance)
+c50_all_real_auc <- calc_multiclass_auc(c50_all, test_real, test_real$valence)
+
+# C5.0 - Fake
+c50_all_fake_mcc <- calc_mcc(c50_all_fake_performance)
+c50_all_fake_auc <- calc_multiclass_auc(c50_all, test_fake, test_fake$valence)
+
+# SVM - Real
+svm_all_real_mcc <- calc_mcc(svm_all_real_performance)
+svm_all_real_auc <- calc_multiclass_auc(svm_all, test_real, test_real$valence)
+
+# SVM - Fake
+svm_all_fake_mcc <- calc_mcc(svm_all_fake_performance)
+svm_all_fake_auc <- calc_multiclass_auc(svm_all, test_fake, test_fake$valence)
+
+# LR - Real
+lr_all_real_mcc <- calc_mcc(lr_all_real_performance)
+lr_all_real_auc <- calc_multiclass_auc(lr_all, test_real, test_real$valence)
+
+# LR - Fake
+lr_all_fake_mcc <- calc_mcc(lr_all_fake_performance)
+lr_all_fake_auc <- calc_multiclass_auc(lr_all, test_fake, test_fake$valence)
+
+# === ANALYSIS 1 SUMMARY TABLE ===
+analysis1_summary <- data.frame(
+  Model = c("RF", "C5.0B", "SVM", "LR"),
+  Subset = rep(c("Real", "Fake"), each = 4),
+  
+  Accuracy = c(
+    rf_all_real_performance$overall["Accuracy"],
+    c50_all_real_performance$overall["Accuracy"],
+    svm_all_real_performance$overall["Accuracy"],
+    lr_all_real_performance$overall["Accuracy"],
+    rf_all_fake_performance$overall["Accuracy"],
+    c50_all_fake_performance$overall["Accuracy"],
+    svm_all_fake_performance$overall["Accuracy"],
+    lr_all_fake_performance$overall["Accuracy"]
+  ),
+  
+  P_value = c(
+    rf_all_real_performance$overall["AccuracyPValue"],
+    c50_all_real_performance$overall["AccuracyPValue"],
+    svm_all_real_performance$overall["AccuracyPValue"],
+    lr_all_real_performance$overall["AccuracyPValue"],
+    rf_all_fake_performance$overall["AccuracyPValue"],
+    c50_all_fake_performance$overall["AccuracyPValue"],
+    svm_all_fake_performance$overall["AccuracyPValue"],
+    lr_all_fake_performance$overall["AccuracyPValue"]
+  ),
+  
+  Kappa = c(
+    rf_all_real_performance$overall["Kappa"],
+    c50_all_real_performance$overall["Kappa"],
+    svm_all_real_performance$overall["Kappa"],
+    lr_all_real_performance$overall["Kappa"],
+    rf_all_fake_performance$overall["Kappa"],
+    c50_all_fake_performance$overall["Kappa"],
+    svm_all_fake_performance$overall["Kappa"],
+    lr_all_fake_performance$overall["Kappa"]
+  ),
+  
+  MCC = c(
+    rf_all_real_mcc, c50_all_real_mcc, svm_all_real_mcc, lr_all_real_mcc,
+    rf_all_fake_mcc, c50_all_fake_mcc, svm_all_fake_mcc, lr_all_fake_mcc
+  ),
+  
+  AUC = c(
+    rf_all_real_auc, c50_all_real_auc, svm_all_real_auc, lr_all_real_auc,
+    rf_all_fake_auc, c50_all_fake_auc, svm_all_fake_auc, lr_all_fake_auc
+  ),
+  
+  Sens_Pos = c(
+    rf_all_real_performance$byClass["Class: positive", "Sensitivity"],
+    c50_all_real_performance$byClass["Class: positive", "Sensitivity"],
+    svm_all_real_performance$byClass["Class: positive", "Sensitivity"],
+    lr_all_real_performance$byClass["Class: positive", "Sensitivity"],
+    rf_all_fake_performance$byClass["Class: positive", "Sensitivity"],
+    c50_all_fake_performance$byClass["Class: positive", "Sensitivity"],
+    svm_all_fake_performance$byClass["Class: positive", "Sensitivity"],
+    lr_all_fake_performance$byClass["Class: positive", "Sensitivity"]
+  ),
+  
+  Sens_Neu = c(
+    rf_all_real_performance$byClass["Class: neutral", "Sensitivity"],
+    c50_all_real_performance$byClass["Class: neutral", "Sensitivity"],
+    svm_all_real_performance$byClass["Class: neutral", "Sensitivity"],
+    lr_all_real_performance$byClass["Class: neutral", "Sensitivity"],
+    rf_all_fake_performance$byClass["Class: neutral", "Sensitivity"],
+    c50_all_fake_performance$byClass["Class: neutral", "Sensitivity"],
+    svm_all_fake_performance$byClass["Class: neutral", "Sensitivity"],
+    lr_all_fake_performance$byClass["Class: neutral", "Sensitivity"]
+  ),
+  
+  Sens_Neg = c(
+    rf_all_real_performance$byClass["Class: negative", "Sensitivity"],
+    c50_all_real_performance$byClass["Class: negative", "Sensitivity"],
+    svm_all_real_performance$byClass["Class: negative", "Sensitivity"],
+    lr_all_real_performance$byClass["Class: negative", "Sensitivity"],
+    rf_all_fake_performance$byClass["Class: negative", "Sensitivity"],
+    c50_all_fake_performance$byClass["Class: negative", "Sensitivity"],
+    svm_all_fake_performance$byClass["Class: negative", "Sensitivity"],
+    lr_all_fake_performance$byClass["Class: negative", "Sensitivity"]
+  ),
+  
+  Spec_Pos = c(
+    rf_all_real_performance$byClass["Class: positive", "Specificity"],
+    c50_all_real_performance$byClass["Class: positive", "Specificity"],
+    svm_all_real_performance$byClass["Class: positive", "Specificity"],
+    lr_all_real_performance$byClass["Class: positive", "Specificity"],
+    rf_all_fake_performance$byClass["Class: positive", "Specificity"],
+    c50_all_fake_performance$byClass["Class: positive", "Specificity"],
+    svm_all_fake_performance$byClass["Class: positive", "Specificity"],
+    lr_all_fake_performance$byClass["Class: positive", "Specificity"]
+  ),
+  
+  Spec_Neu = c(
+    rf_all_real_performance$byClass["Class: neutral", "Specificity"],
+    c50_all_real_performance$byClass["Class: neutral", "Specificity"],
+    svm_all_real_performance$byClass["Class: neutral", "Specificity"],
+    lr_all_real_performance$byClass["Class: neutral", "Specificity"],
+    rf_all_fake_performance$byClass["Class: neutral", "Specificity"],
+    c50_all_fake_performance$byClass["Class: neutral", "Specificity"],
+    svm_all_fake_performance$byClass["Class: neutral", "Specificity"],
+    lr_all_fake_performance$byClass["Class: neutral", "Specificity"]
+  ),
+  
+  Spec_Neg = c(
+    rf_all_real_performance$byClass["Class: negative", "Specificity"],
+    c50_all_real_performance$byClass["Class: negative", "Specificity"],
+    svm_all_real_performance$byClass["Class: negative", "Specificity"],
+    lr_all_real_performance$byClass["Class: negative", "Specificity"],
+    rf_all_fake_performance$byClass["Class: negative", "Specificity"],
+    c50_all_fake_performance$byClass["Class: negative", "Specificity"],
+    svm_all_fake_performance$byClass["Class: negative", "Specificity"],
+    lr_all_fake_performance$byClass["Class: negative", "Specificity"]
+  )
+)
+
+# Reshape to wide format (Real and Fake side by side)
+analysis1_real <- analysis1_summary[analysis1_summary$Subset == "Real", -2]
+analysis1_fake <- analysis1_summary[analysis1_summary$Subset == "Fake", -2]
+
+colnames(analysis1_real)[-1] <- paste0("Real_", colnames(analysis1_real)[-1])
+colnames(analysis1_fake)[-1] <- paste0("Fake_", colnames(analysis1_fake)[-1])
+
+analysis1_wide <- merge(analysis1_real, analysis1_fake, by = "Model")
+
+# Format for publication using kable
+library(knitr)
+library(kableExtra)
+
+# Format p-values
+format_pval <- function(p) {
+  ifelse(p < 0.001, "<.001", 
+         ifelse(p < 0.01, sprintf("%.3f", p),
+                sprintf("%.3f", p)))
+}
+
+analysis1_pub <- analysis1_wide %>%
+  mutate(
+    across(c(Real_Accuracy, Fake_Accuracy, Real_Kappa, Fake_Kappa, 
+             Real_MCC, Fake_MCC, Real_AUC, Fake_AUC,
+             Real_Sens_Pos, Real_Sens_Neu, Real_Sens_Neg,
+             Fake_Sens_Pos, Fake_Sens_Neu, Fake_Sens_Neg,
+             Real_Spec_Pos, Real_Spec_Neu, Real_Spec_Neg,
+             Fake_Spec_Pos, Fake_Spec_Neu, Fake_Spec_Neg), 
+           ~ sprintf("%.3f", .)),
+    Real_P_value = format_pval(Real_P_value),
+    Fake_P_value = format_pval(Fake_P_value)
+  )
+
+# Create publishable table
+kable(analysis1_pub,
+      caption = "Table X. Analysis 1: Valence Classification Performance (Trained on All Data)",
+      col.names = c("Model", 
+                    "Acc", "p", "κ", "MCC", "AUC", 
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−",
+                    "Acc", "p", "κ", "MCC", "AUC",
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−"),
+      align = c("l", rep("c", 22)),
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position"),
+                font_size = 9) %>%
+  add_header_above(c(" " = 1, 
+                     "Real Test Subset" = 11, 
+                     "Fake Test Subset" = 11))
+```
+
+# Analysis 2: Train on Real Data Only
+
+```{r}
+cat("\n\n=== ANALYSIS 2: Training on REAL data only ===\n\n")
+
+# Filter training data to only include real videos
+dta_classifier_train_real <- dta_classifier_train_all %>%
+  filter(isfakeorreal == "real")
+
+# Test data remains the same (has both real and fake)
+dta_classifier_test_real_only <- dta_classifier_test_all
+
+# Test subsets are the same as Analysis 1
+# test_real and test_fake already defined
+
+cat("Training on", nrow(dta_classifier_train_real), "REAL videos only\n")
+cat("Test set (total):", nrow(dta_classifier_test_real_only), "videos\n")
+cat("  - Real videos:", nrow(test_real), "\n")
+cat("  - Fake videos:", nrow(test_fake), "\n\n")
+
+# Check class distribution
+cat("Training set (REAL only) valence distribution:\n")
+print(table(dta_classifier_train_real$valence))
+
+cat("\nTest set valence distribution (Real):\n")
+print(table(test_real$valence))
+
+cat("\nTest set valence distribution (Fake):\n")
+print(table(test_fake$valence))
+```
+
+## Random Forest
+
+```{r}
+set.seed(12345)
+
+# Train Random Forest on REAL data only
+cat("\n--- Training Random Forest (Real Only) ---\n")
+rf_real <- train(
+  valence ~ .,
+  data = dta_classifier_train_real[, -c(1:2)],  # Remove video_filename and isfakeorreal
+  method = "rf",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneLength = 5,
+  importance = TRUE
+)
+
+cat("\nRandom Forest (Real Only) - CV Results:\n")
+print(rf_real)
+
+# Feature importance
+cat("\nTop 10 most important features:\n")
+rf_real_importance <- varImp(rf_real)
+print(rf_real_importance, top = 10)
+```
+
+Evaluate on test data:
+
+```{r}
+# Evaluate on real test videos
+rf_real_real_pred <- predict(rf_real, newdata = test_real)
+rf_real_real_performance <- confusionMatrix(
+  data = rf_real_real_pred,
+  reference = test_real$valence
+)
+
+cat("\nRandom Forest (Real Only) - Real Test Videos:\n")
+print(rf_real_real_performance)
+
+# Evaluate on fake test videos
+rf_real_fake_pred <- predict(rf_real, newdata = test_fake)
+rf_real_fake_performance <- confusionMatrix(
+  data = rf_real_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nRandom Forest (Real Only) - Fake Test Videos:\n")
+print(rf_real_fake_performance)
+
+# Calculate performance drop
+rf_real_drop <- rf_real_real_performance$overall["Accuracy"] - 
+                rf_real_fake_performance$overall["Accuracy"]
+cat("\nPerformance drop (Real → Fake):", round(rf_real_drop * 100, 2), "%\n")
+
+```
+
+## C5.0B
+
+```{r}
+set.seed(12345)
+
+# Train C5.0 on REAL data only
+cat("\n--- Training C5.0 Boosted Trees (Real Only) ---\n")
+c50_real <- train(
+  valence ~ .,
+  data = dta_classifier_train_real[, -c(1:2)],
+  method = "C5.0",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneGrid = expand.grid(
+    trials = c(1, 10, 20, 30),
+    model = "tree",
+    winnow = FALSE
+  )
+)
+
+cat("\nC5.0 Boosted (Real Only) - CV Results:\n")
+print(c50_real)
+```
+
+Evaluate on test data:
+
+```{r}
+# Evaluate on real test videos
+c50_real_real_pred <- predict(c50_real, newdata = test_real)
+c50_real_real_performance <- confusionMatrix(
+  data = c50_real_real_pred,
+  reference = test_real$valence
+)
+
+cat("\nC5.0 Boosted (Real Only) - Real Test Videos:\n")
+print(c50_real_real_performance)
+
+# Evaluate on fake test videos
+c50_real_fake_pred <- predict(c50_real, newdata = test_fake)
+c50_real_fake_performance <- confusionMatrix(
+  data = c50_real_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nC5.0 Boosted (Real Only) - Fake Test Videos:\n")
+print(c50_real_fake_performance)
+
+# Calculate performance drop
+c50_real_drop <- c50_real_real_performance$overall["Accuracy"] - 
+                 c50_real_fake_performance$overall["Accuracy"]
+cat("\nPerformance drop (Real → Fake):", round(c50_real_drop * 100, 2), "%\n")
+```
+
+## SVM
+
+```{r}
+set.seed(12345)
+
+# Train SVM on REAL data only
+cat("\n--- Training SVM (Real Only) ---\n")
+svm_real <- train(
+  valence ~ .,
+  data = dta_classifier_train_real[, -c(1:2)],
+  method = "svmRadial",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneLength = 5,
+  preProcess = c("center", "scale")
+)
+
+cat("\nSVM (Real Only) - CV Results:\n")
+print(svm_real)
+```
+
+Evaluate on test data:
+
+```{r}
+# Evaluate on real test videos
+svm_real_real_pred <- predict(svm_real, newdata = test_real)
+svm_real_real_performance <- confusionMatrix(
+  data = svm_real_real_pred,
+  reference = test_real$valence
+)
+
+cat("\nSVM (Real Only) - Real Test Videos:\n")
+print(svm_real_real_performance)
+
+# Evaluate on fake test videos
+svm_real_fake_pred <- predict(svm_real, newdata = test_fake)
+svm_real_fake_performance <- confusionMatrix(
+  data = svm_real_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nSVM (Real Only) - Fake Test Videos:\n")
+print(svm_real_fake_performance)
+
+# Calculate performance drop
+svm_real_drop <- svm_real_real_performance$overall["Accuracy"] - 
+                 svm_real_fake_performance$overall["Accuracy"]
+cat("\nPerformance drop (Real → Fake):", round(svm_real_drop * 100, 2), "%\n")
+
+```
+
+## Logistic Regression
+
+```{r}
+set.seed(12345)
+
+# Train Logistic Regression on REAL data only
+cat("\n--- Training Logistic Regression (Real Only) ---\n")
+lr_real <- train(
+  valence ~ .,
+  data = dta_classifier_train_real[, -c(1:2)],
+  method = "multinom",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  trace = FALSE,
+  MaxNWts = 5000
+)
+
+cat("\nLogistic Regression (Real Only) - CV Results:\n")
+print(lr_real)
+```
+
+Evaluate on test data:
+
+```{r}
+# Evaluate on real test videos
+lr_real_real_pred <- predict(lr_real, newdata = test_real)
+lr_real_real_performance <- confusionMatrix(
+  data = lr_real_real_pred,
+  reference = test_real$valence
+)
+
+cat("\nLogistic Regression (Real Only) - Real Test Videos:\n")
+print(lr_real_real_performance)
+
+# Evaluate on fake test videos
+lr_real_fake_pred <- predict(lr_real, newdata = test_fake)
+lr_real_fake_performance <- confusionMatrix(
+  data = lr_real_fake_pred,
+  reference = test_fake$valence
+)
+
+cat("\nLogistic Regression (Real Only) - Fake Test Videos:\n")
+print(lr_real_fake_performance)
+
+# Calculate performance drop
+lr_real_drop <- lr_real_real_performance$overall["Accuracy"] - 
+                lr_real_fake_performance$overall["Accuracy"]
+cat("\nPerformance drop (Real → Fake):", round(lr_real_drop * 100, 2), "%\n")
+```
+
+Overall findings:
+
+-   There is an average performance drop of 5.32% between the models.
+
+-   This suggest that there is some emotional information being degraded in deepfakes, but the degradation is less severe than expected.
+
+-   The effect is model-dependent. RF shows the biggest performance drop, suggesting that it learned complex emotional patterns from real videos which did not generalise well to fakes, whereas the other models did not learn such complex patterns.
+
+-   This suggests that there is signal degradation in RF specifically.
+
+-   The other models had lower performance drops perhaps because they learned simpler and more generalisable patterns, or they are less sensitive to the subtle degradation present.
+
+-   The performance drops are smaller on average (or equal) in analysis 2 compared to analysis 1. This suggests that when models are trained on both real and fake, they learn that fake videos have different patterns, they become sensitive to these differences, and then they show larger performance gaps between real and fake test videos.
+
+-   When models are trained on only real videos, however, they do not know fake videos exist, so they try to apply real video patterns to both test sets, leading to smaller drops because they are not expecting differences.
+
+-   This supports the hypothesis that emotional signal degradation is occurring. If emotional signals were preserved in fakes, analysis 2 would show zero or minimal drop, where models trained on real should work equally well on fake. We instead see drops of 5-12%.
+
+-   The fact that analysis 1 shows the larger drops suggests that models can learn to exploit the degradation when exposed to fake videos in training. The degraded patterns are consistent enough to be learned.
+
+-   Negative class still has poor performance due to being the minority class.
+
+Since the negative class is barely being detected (sensitivity 8-25% across models), this is essentially just classifying positive vs. neutral, which is functionally similar to classifying emotion yes vs. no. This does not adequately test whether the emotional signal is being degraded. To properly test this, the classes need to be balanced. This could be tricky given that the negative class has significantly less data (about half compared to positive and neutral).
+
+There are several options to address this:
+
+1.  Downsampling
+2.  Upsampling
+3.  Hybrid approach (slightly downsample majority classes and slightly upsample minority)
+4.  Create new negative videos from discarded data during initial preprocessing steps.
+
+Downsampling means that there is no synthetic data, but you are essentially throwing away a lot of data. This could hurt model performance as there are less data to learn from. For analysis 1, this would mean we go from P=144, Neu=154, Neg=72 to P=72, Neu=72, Neg=72. This would mean discarding 154 videos from the training dataset (nearly half).
+
+Upsampling means that we keep the data in positive and neutral, but we add synthetic data to the Negative class. This can either be done by adding duplicates or synthetic data with variation. The cons of this approach is that the model may overfit to synthetic patterns, and it is more complex to create synthetic data with variations for this kind of dataset: the CMFTS features are calculated independently based on time series data - it is unlikely that an upsampling technique can effectively simulate this for synthetic data.
+
+Doing a hybrid approach of both downsampling and upsampling reduces the cons of both approaches.
+
+Creating new videos for the negative class could be done by taking the discarded data from the initial preprocessing. Videos were truncated to the first ten seconds, and anything after that was discarded. We could increase the negative class by taking the discarded parts (say 10-20 seconds). A potential issue with this is that the videos could be largely the same compared to the first 10 seconds, which would have similar effects to data duplication.
+
+I believe downsampling is the most suitable approach as it maintains data authenticity and avoids the complications of synthesising data that is temporally coherent. This approach will reduce statistical power, but if the emotional degradation is genuine and substantial, it should still be detectable even with a smaller sample size.
+
+Table:
+
+```{r}
+# === ANALYSIS 2: Calculate Additional Metrics ===
+
+# RF - Real
+rf_real_real_mcc <- calc_mcc(rf_real_real_performance)
+rf_real_real_auc <- calc_multiclass_auc(rf_real, test_real, test_real$valence)
+
+# RF - Fake
+rf_real_fake_mcc <- calc_mcc(rf_real_fake_performance)
+rf_real_fake_auc <- calc_multiclass_auc(rf_real, test_fake, test_fake$valence)
+
+# C5.0 - Real
+c50_real_real_mcc <- calc_mcc(c50_real_real_performance)
+c50_real_real_auc <- calc_multiclass_auc(c50_real, test_real, test_real$valence)
+
+# C5.0 - Fake
+c50_real_fake_mcc <- calc_mcc(c50_real_fake_performance)
+c50_real_fake_auc <- calc_multiclass_auc(c50_real, test_fake, test_fake$valence)
+
+# SVM - Real
+svm_real_real_mcc <- calc_mcc(svm_real_real_performance)
+svm_real_real_auc <- calc_multiclass_auc(svm_real, test_real, test_real$valence)
+
+# SVM - Fake
+svm_real_fake_mcc <- calc_mcc(svm_real_fake_performance)
+svm_real_fake_auc <- calc_multiclass_auc(svm_real, test_fake, test_fake$valence)
+
+# LR - Real
+lr_real_real_mcc <- calc_mcc(lr_real_real_performance)
+lr_real_real_auc <- calc_multiclass_auc(lr_real, test_real, test_real$valence)
+
+# LR - Fake
+lr_real_fake_mcc <- calc_mcc(lr_real_fake_performance)
+lr_real_fake_auc <- calc_multiclass_auc(lr_real, test_fake, test_fake$valence)
+
+# === ANALYSIS 2 SUMMARY TABLE ===
+analysis2_summary <- data.frame(
+  Model = c("RF", "C5.0B", "SVM", "LR"),
+  Subset = rep(c("Real", "Fake"), each = 4),
+  
+  Accuracy = c(
+    rf_real_real_performance$overall["Accuracy"],
+    c50_real_real_performance$overall["Accuracy"],
+    svm_real_real_performance$overall["Accuracy"],
+    lr_real_real_performance$overall["Accuracy"],
+    rf_real_fake_performance$overall["Accuracy"],
+    c50_real_fake_performance$overall["Accuracy"],
+    svm_real_fake_performance$overall["Accuracy"],
+    lr_real_fake_performance$overall["Accuracy"]
+  ),
+  
+  P_value = c(
+    rf_real_real_performance$overall["AccuracyPValue"],
+    c50_real_real_performance$overall["AccuracyPValue"],
+    svm_real_real_performance$overall["AccuracyPValue"],
+    lr_real_real_performance$overall["AccuracyPValue"],
+    rf_real_fake_performance$overall["AccuracyPValue"],
+    c50_real_fake_performance$overall["AccuracyPValue"],
+    svm_real_fake_performance$overall["AccuracyPValue"],
+    lr_real_fake_performance$overall["AccuracyPValue"]
+  ),
+  
+  Kappa = c(
+    rf_real_real_performance$overall["Kappa"],
+    c50_real_real_performance$overall["Kappa"],
+    svm_real_real_performance$overall["Kappa"],
+    lr_real_real_performance$overall["Kappa"],
+    rf_real_fake_performance$overall["Kappa"],
+    c50_real_fake_performance$overall["Kappa"],
+    svm_real_fake_performance$overall["Kappa"],
+    lr_real_fake_performance$overall["Kappa"]
+  ),
+  
+  MCC = c(
+    rf_real_real_mcc, c50_real_real_mcc, svm_real_real_mcc, lr_real_real_mcc,
+    rf_real_fake_mcc, c50_real_fake_mcc, svm_real_fake_mcc, lr_real_fake_mcc
+  ),
+  
+  AUC = c(
+    rf_real_real_auc, c50_real_real_auc, svm_real_real_auc, lr_real_real_auc,
+    rf_real_fake_auc, c50_real_fake_auc, svm_real_fake_auc, lr_real_fake_auc
+  ),
+  
+  Sens_Pos = c(
+    rf_real_real_performance$byClass["Class: positive", "Sensitivity"],
+    c50_real_real_performance$byClass["Class: positive", "Sensitivity"],
+    svm_real_real_performance$byClass["Class: positive", "Sensitivity"],
+    lr_real_real_performance$byClass["Class: positive", "Sensitivity"],
+    rf_real_fake_performance$byClass["Class: positive", "Sensitivity"],
+    c50_real_fake_performance$byClass["Class: positive", "Sensitivity"],
+    svm_real_fake_performance$byClass["Class: positive", "Sensitivity"],
+    lr_real_fake_performance$byClass["Class: positive", "Sensitivity"]
+  ),
+  
+  Sens_Neu = c(
+    rf_real_real_performance$byClass["Class: neutral", "Sensitivity"],
+    c50_real_real_performance$byClass["Class: neutral", "Sensitivity"],
+    svm_real_real_performance$byClass["Class: neutral", "Sensitivity"],
+    lr_real_real_performance$byClass["Class: neutral", "Sensitivity"],
+    rf_real_fake_performance$byClass["Class: neutral", "Sensitivity"],
+    c50_real_fake_performance$byClass["Class: neutral", "Sensitivity"],
+    svm_real_fake_performance$byClass["Class: neutral", "Sensitivity"],
+    lr_real_fake_performance$byClass["Class: neutral", "Sensitivity"]
+  ),
+  
+  Sens_Neg = c(
+    rf_real_real_performance$byClass["Class: negative", "Sensitivity"],
+    c50_real_real_performance$byClass["Class: negative", "Sensitivity"],
+    svm_real_real_performance$byClass["Class: negative", "Sensitivity"],
+    lr_real_real_performance$byClass["Class: negative", "Sensitivity"],
+    rf_real_fake_performance$byClass["Class: negative", "Sensitivity"],
+    c50_real_fake_performance$byClass["Class: negative", "Sensitivity"],
+    svm_real_fake_performance$byClass["Class: negative", "Sensitivity"],
+    lr_real_fake_performance$byClass["Class: negative", "Sensitivity"]
+  ),
+  
+  Spec_Pos = c(
+    rf_real_real_performance$byClass["Class: positive", "Specificity"],
+    c50_real_real_performance$byClass["Class: positive", "Specificity"],
+    svm_real_real_performance$byClass["Class: positive", "Specificity"],
+    lr_real_real_performance$byClass["Class: positive", "Specificity"],
+    rf_real_fake_performance$byClass["Class: positive", "Specificity"],
+    c50_real_fake_performance$byClass["Class: positive", "Specificity"],
+    svm_real_fake_performance$byClass["Class: positive", "Specificity"],
+    lr_real_fake_performance$byClass["Class: positive", "Specificity"]
+  ),
+  
+  Spec_Neu = c(
+    rf_real_real_performance$byClass["Class: neutral", "Specificity"],
+    c50_real_real_performance$byClass["Class: neutral", "Specificity"],
+    svm_real_real_performance$byClass["Class: neutral", "Specificity"],
+    lr_real_real_performance$byClass["Class: neutral", "Specificity"],
+    rf_real_fake_performance$byClass["Class: neutral", "Specificity"],
+    c50_real_fake_performance$byClass["Class: neutral", "Specificity"],
+    svm_real_fake_performance$byClass["Class: neutral", "Specificity"],
+    lr_real_fake_performance$byClass["Class: neutral", "Specificity"]
+  ),
+  
+  Spec_Neg = c(
+    rf_real_real_performance$byClass["Class: negative", "Specificity"],
+    c50_real_real_performance$byClass["Class: negative", "Specificity"],
+    svm_real_real_performance$byClass["Class: negative", "Specificity"],
+    lr_real_real_performance$byClass["Class: negative", "Specificity"],
+    rf_real_fake_performance$byClass["Class: negative", "Specificity"],
+    c50_real_fake_performance$byClass["Class: negative", "Specificity"],
+    svm_real_fake_performance$byClass["Class: negative", "Specificity"],
+    lr_real_fake_performance$byClass["Class: negative", "Specificity"]
+  )
+)
+
+# Reshape to wide format
+analysis2_real <- analysis2_summary[analysis2_summary$Subset == "Real", -2]
+analysis2_fake <- analysis2_summary[analysis2_summary$Subset == "Fake", -2]
+
+colnames(analysis2_real)[-1] <- paste0("Real_", colnames(analysis2_real)[-1])
+colnames(analysis2_fake)[-1] <- paste0("Fake_", colnames(analysis2_fake)[-1])
+
+analysis2_wide <- merge(analysis2_real, analysis2_fake, by = "Model")
+
+# Format for publication
+analysis2_pub <- analysis2_wide %>%
+  mutate(
+    across(c(Real_Accuracy, Fake_Accuracy, Real_Kappa, Fake_Kappa, 
+             Real_MCC, Fake_MCC, Real_AUC, Fake_AUC,
+             Real_Sens_Pos, Real_Sens_Neu, Real_Sens_Neg,
+             Fake_Sens_Pos, Fake_Sens_Neu, Fake_Sens_Neg,
+             Real_Spec_Pos, Real_Spec_Neu, Real_Spec_Neg,
+             Fake_Spec_Pos, Fake_Spec_Neu, Fake_Spec_Neg), 
+           ~ sprintf("%.3f", .)),
+    Real_P_value = format_pval(Real_P_value),
+    Fake_P_value = format_pval(Fake_P_value)
+  )
+
+# Create publishable table
+kable(analysis2_pub,
+      caption = "Table X. Analysis 2: Valence Classification Performance (Trained on Real Videos Only)",
+      col.names = c("Model", 
+                    "Acc", "p", "κ", "MCC", "AUC", 
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−",
+                    "Acc", "p", "κ", "MCC", "AUC",
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−"),
+      align = c("l", rep("c", 22)),
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position"),
+                font_size = 9) %>%
+  add_header_above(c(" " = 1, 
+                     "Real Test Subset" = 11, 
+                     "Fake Test Subset" = 11))
+```
+
+# Balancing Valence (Downsampling)
+
+```{r}
+set.seed(12345)
+
+# Go back to the FULL feature set (before feature selection)
+# We need to balance BEFORE feature selection
+dta_train_full <- dta_cmfts_output_imputed_zerosd
+dta_test_full <- dta_cmfts_test_output_imputed_zerosd
+
+# Get minimum class size
+min_class_size <- dta_train_full %>%
+  count(valence) %>%
+  pull(n) %>%
+  min()
+
+cat("Minimum class size (negative):", min_class_size, "\n")
+cat("This is the target size for all classes after downsampling.\n\n")
+
+# Downsample training data to balance classes
+dta_train_balanced <- dta_train_full %>%
+  group_by(valence) %>%
+  slice_sample(n = min_class_size, replace = FALSE) %>%
+  ungroup()
+
+cat("Original training set size:", nrow(dta_train_full), "\n")
+cat("Balanced training set size:", nrow(dta_train_balanced), "\n")
+cat("Videos discarded:", nrow(dta_train_full) - nrow(dta_train_balanced), "\n\n")
+
+cat("Balanced training set valence distribution:\n")
+print(table(dta_train_balanced$valence))
+
+cat("\nBalanced training set real/fake distribution:\n")
+print(table(dta_train_balanced$isfakeorreal, dta_train_balanced$valence))
+
+# Test data stays the same
+cat("\nTest set size:", nrow(dta_test_full), "\n")
+```
+
+# Feature Selection (Balanced)
+
+```{r, fig.height=8, fig.width=10}
+cat("\n=== Re-running Feature Selection on Balanced Data ===\n\n")
+
+set.seed(12345)
+
+# Create a subset for Boruta with balanced data
+# Use all features (columns 5 onwards, excluding video_filename, isfakeorreal, emotion, valence)
+feature_cols_balanced <- names(dta_train_balanced)[5:ncol(dta_train_balanced)]
+
+boruta_train_balanced <- dta_train_balanced %>%
+  select(valence, all_of(feature_cols_balanced))
+
+# Make sure outcome variable is factor
+boruta_train_balanced$valence <- as.factor(boruta_train_balanced$valence)
+
+cat("Running Boruta feature selection on", nrow(boruta_train_balanced), 
+    "balanced samples with", length(feature_cols_balanced), "features...\n\n")
+
+# Boruta
+boruta_output_balanced <- Boruta::Boruta(
+  valence ~ ., 
+  data = boruta_train_balanced, 
+  doTrace = 2,
+  maxRuns = 100
+)
+
+# Solve tentative features
+boruta_output_balanced <- Boruta::TentativeRoughFix(boruta_output_balanced)
+
+# Output
+print(boruta_output_balanced)
+
+# Plot
+par(mar = c(12, 4, 4, 2) + 0.1)
+plot(boruta_output_balanced, las = 2)
+
+# Get confirmed important features
+important_features_balanced <- Boruta::getSelectedAttributes(
+  boruta_output_balanced, 
+  withTentative = FALSE
+)
+
+cat("\n", length(important_features_balanced), 
+    "features confirmed as important:\n")
+print(important_features_balanced)
+
+# Get ranked features
+feature_stats_balanced <- Boruta::attStats(boruta_output_balanced)
+feature_stats_balanced$features <- rownames(feature_stats_balanced)
+
+ranked_features_balanced <- feature_stats_balanced %>%
+  filter(decision == "Confirmed") %>%
+  arrange(desc(medianImp))
+
+cat("\nTop 10 most important features:\n")
+print(head(ranked_features_balanced, 10))
+
+# Store ranked feature names
+ranked_feature_names_balanced <- ranked_features_balanced$features
+```
+
+Boruta confirmed 38 features as important.
+
+1.  shannon_entropy_CS_nmf1
+2.  shannon_entropy_SG_nmf2
+3.  diff2_acf1_nmf1
+4.  shannon_entropy_CS_nmf3
+5.  linearity_nmf3
+
+The important features are largely the same with some minor differences.
+
+# Prepare Datasets for Analyses
+
+```{r}
+# Prepare balanced training data with selected features
+dta_classifier_train_balanced <- dta_train_balanced %>%
+  select(video_filename, isfakeorreal, valence, all_of(important_features_balanced))
+
+cat("\nBalanced training data prepared:\n")
+cat("  - Total videos:", nrow(dta_classifier_train_balanced), "\n")
+cat("  - Features:", length(important_features_balanced), "\n")
+cat("  - Valence distribution:\n")
+print(table(dta_classifier_train_balanced$valence))
+
+# Prepare test data with same features
+dta_classifier_test_balanced <- dta_test_full %>%
+  select(video_filename, isfakeorreal, valence, all_of(important_features_balanced))
+
+# Ensure valence is factor with same levels in both train and test
+dta_classifier_train_balanced$valence <- factor(
+  dta_classifier_train_balanced$valence, 
+  levels = c("positive", "neutral", "negative")
+)
+dta_classifier_test_balanced$valence <- factor(
+  dta_classifier_test_balanced$valence, 
+  levels = c("positive", "neutral", "negative")
+)
+
+# Create test subsets
+dta_test_real_balanced <- dta_classifier_test_balanced %>% filter(isfakeorreal == "real")
+dta_test_fake_balanced <- dta_classifier_test_balanced %>% filter(isfakeorreal == "fake")
+
+cat("\nTest set prepared:\n")
+cat("  - Total:", nrow(dta_classifier_test_balanced), "\n")
+cat("  - Real:", nrow(dta_test_real_balanced), "\n")
+cat("  - Fake:", nrow(dta_test_fake_balanced), "\n\n")
+
+cat("Test set valence distribution (Real):\n")
+print(table(dta_test_real_balanced$valence))
+
+cat("\nTest set valence distribution (Fake):\n")
+print(table(dta_test_fake_balanced$valence))
+```
+
+# Analysis 1 (Balanced)
+
+## Random Forest
+
+```{r}
+# Setup cross-validation
+classifier_control_cv <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(12345)
+
+# Train Random Forest
+cat("\n--- Training Random Forest ---\n")
+rf_all_balanced <- train(
+  valence ~ .,
+  data = dta_classifier_train_balanced[, -c(1:2)],  # Remove video_filename and isfakeorreal
+  method = "rf",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneLength = 5,
+  importance = TRUE
+)
+
+cat("\nRandom Forest (All Data - Balanced) - CV Results:\n")
+print(rf_all_balanced)
+
+# Feature importance
+cat("\nTop 10 most important features:\n")
+rf_balanced_importance <- varImp(rf_all_balanced)
+print(rf_balanced_importance, top = 10)
+```
+
+Evaluate on test data:
+
+```{r}
+rf_balanced_all_test_pred <- predict(rf_all_balanced, newdata = dta_classifier_test_balanced)
+rf_balanced_all_test_perf <- confusionMatrix(
+  data = rf_balanced_all_test_pred,
+  reference = dta_classifier_test_balanced$valence
+)
+
+cat("\nRandom Forest (Balanced, All Data) - Full Test Set:\n")
+print(rf_balanced_all_test_perf)
+
+# Per-class metrics
+cat("\nPer-class sensitivity (Full test):\n")
+print(rf_balanced_all_test_perf$byClass[, "Sensitivity"])
+
+cat("\nPer-class specificity (Full test):\n")
+print(rf_balanced_all_test_perf$byClass[, "Specificity"])
+
+# REAL videos
+rf_balanced_all_real_pred <- predict(rf_all_balanced, newdata = test_real_balanced)
+rf_balanced_all_real_perf <- confusionMatrix(
+  data = rf_balanced_all_real_pred,
+  reference = dta_test_real_balanced$valence
+)
+
+cat("\nRandom Forest (Balanced, All Data) - Real Test Videos:\n")
+print(rf_balanced_all_real_perf)
+
+cat("\nPer-class sensitivity (Real test):\n")
+print(rf_balanced_all_real_perf$byClass[, "Sensitivity"])
+
+
+# FAKE videos
+rf_balanced_all_fake_pred <- predict(rf_all_balanced, newdata = test_fake_balanced)
+rf_balanced_all_fake_perf <- confusionMatrix(
+  data = rf_balanced_all_fake_pred,
+  reference = dta_test_fake_balanced$valence
+)
+
+cat("\nRandom Forest (Balanced, All Data) - Fake Test Videos:\n")
+print(rf_balanced_all_fake_perf)
+
+cat("\nPer-class sensitivity (Fake test):\n")
+print(rf_balanced_all_fake_perf$byClass[, "Sensitivity"])
+```
+
+Table:
+
+```{r}
+# === ANALYSIS 1 BALANCED: Calculate Additional Metrics ===
+
+# RF - Real
+rf_balanced_all_real_mcc <- calc_mcc(rf_balanced_all_real_perf)
+rf_balanced_all_real_auc <- calc_multiclass_auc(rf_all_balanced, dta_test_real_balanced, dta_test_real_balanced$valence)
+
+# RF - Fake
+rf_balanced_all_fake_mcc <- calc_mcc(rf_balanced_all_fake_perf)
+rf_balanced_all_fake_auc <- calc_multiclass_auc(rf_all_balanced, dta_test_fake_balanced, dta_test_fake_balanced$valence)
+
+# === ANALYSIS 1 BALANCED SUMMARY TABLE ===
+analysis1_bal_summary <- data.frame(
+  Model = "RF",
+  Subset = c("Real", "Fake"),
+  
+  Accuracy = c(
+    rf_balanced_all_real_perf$overall["Accuracy"],
+    rf_balanced_all_fake_perf$overall["Accuracy"]
+  ),
+  
+  P_value = c(
+    rf_balanced_all_real_perf$overall["AccuracyPValue"],
+    rf_balanced_all_fake_perf$overall["AccuracyPValue"]
+  ),
+  
+  Kappa = c(
+    rf_balanced_all_real_perf$overall["Kappa"],
+    rf_balanced_all_fake_perf$overall["Kappa"]
+  ),
+  
+  MCC = c(rf_balanced_all_real_mcc, rf_balanced_all_fake_mcc),
+  
+  AUC = c(rf_balanced_all_real_auc, rf_balanced_all_fake_auc),
+  
+  Sens_Pos = c(
+    rf_balanced_all_real_perf$byClass["Class: positive", "Sensitivity"],
+    rf_balanced_all_fake_perf$byClass["Class: positive", "Sensitivity"]
+  ),
+  
+  Sens_Neu = c(
+    rf_balanced_all_real_perf$byClass["Class: neutral", "Sensitivity"],
+    rf_balanced_all_fake_perf$byClass["Class: neutral", "Sensitivity"]
+  ),
+  
+  Sens_Neg = c(
+    rf_balanced_all_real_perf$byClass["Class: negative", "Sensitivity"],
+    rf_balanced_all_fake_perf$byClass["Class: negative", "Sensitivity"]
+  ),
+  
+  Spec_Pos = c(
+    rf_balanced_all_real_perf$byClass["Class: positive", "Specificity"],
+    rf_balanced_all_fake_perf$byClass["Class: positive", "Specificity"]
+  ),
+  
+  Spec_Neu = c(
+    rf_balanced_all_real_perf$byClass["Class: neutral", "Specificity"],
+    rf_balanced_all_fake_perf$byClass["Class: neutral", "Specificity"]
+  ),
+  
+  Spec_Neg = c(
+    rf_balanced_all_real_perf$byClass["Class: negative", "Specificity"],
+    rf_balanced_all_fake_perf$byClass["Class: negative", "Specificity"]
+  )
+)
+
+# Reshape to wide format
+analysis1_bal_real <- analysis1_bal_summary[analysis1_bal_summary$Subset == "Real", -2]
+analysis1_bal_fake <- analysis1_bal_summary[analysis1_bal_summary$Subset == "Fake", -2]
+
+colnames(analysis1_bal_real)[-1] <- paste0("Real_", colnames(analysis1_bal_real)[-1])
+colnames(analysis1_bal_fake)[-1] <- paste0("Fake_", colnames(analysis1_bal_fake)[-1])
+
+analysis1_bal_wide <- merge(analysis1_bal_real, analysis1_bal_fake, by = "Model")
+
+# Format for publication
+analysis1_bal_pub <- analysis1_bal_wide %>%
+  mutate(
+    across(c(Real_Accuracy, Fake_Accuracy, Real_Kappa, Fake_Kappa, 
+             Real_MCC, Fake_MCC, Real_AUC, Fake_AUC,
+             Real_Sens_Pos, Real_Sens_Neu, Real_Sens_Neg,
+             Fake_Sens_Pos, Fake_Sens_Neu, Fake_Sens_Neg,
+             Real_Spec_Pos, Real_Spec_Neu, Real_Spec_Neg,
+             Fake_Spec_Pos, Fake_Spec_Neu, Fake_Spec_Neg), 
+           ~ sprintf("%.3f", .)),
+    Real_P_value = format_pval(Real_P_value),
+    Fake_P_value = format_pval(Fake_P_value)
+  )
+
+# Create publishable table
+kable(analysis1_bal_pub,
+      caption = "Table X. Analysis 1 (Balanced): Valence Classification Performance (Trained on All Balanced Data)",
+      col.names = c("Model", 
+                    "Acc", "p", "κ", "MCC", "AUC", 
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−",
+                    "Acc", "p", "κ", "MCC", "AUC",
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−"),
+      align = c("l", rep("c", 22)),
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position"),
+                font_size = 9) %>%
+  add_header_above(c(" " = 1, 
+                     "Real Test Subset" = 11, 
+                     "Fake Test Subset" = 11))
+```
+
+# Analysis 2 (Balanced)
+
+```{r}
+cat("\n\n=== ANALYSIS 2 (BALANCED): Training on REAL data only ===\n\n")
+
+# Filter training data to only include real videos
+dta_classifier_train_real_balanced <- dta_classifier_train_balanced %>%
+  filter(isfakeorreal == "real")
+
+cat("Training on", nrow(dta_classifier_train_real_balanced), "REAL videos only\n")
+cat("  - Positive:", sum(dta_classifier_train_real_balanced$valence == "positive"), "\n")
+cat("  - Neutral:", sum(dta_classifier_train_real_balanced$valence == "neutral"), "\n")
+cat("  - Negative:", sum(dta_classifier_train_real_balanced$valence == "negative"), "\n\n")
+
+cat("Test set (total):", nrow(dta_classifier_test_balanced), "videos\n")
+cat("  - Real videos:", nrow(test_real_balanced), "\n")
+cat("  - Fake videos:", nrow(test_fake_balanced), "\n\n")
+```
+
+## Random Forest
+
+```{r}
+set.seed(12345)
+
+cat("\n--- Training Random Forest (Balanced, Real Only) ---\n")
+rf_balanced_real <- train(
+  valence ~ .,
+  data = dta_classifier_train_real_balanced[, -c(1:2)],
+  method = "rf",
+  metric = "Accuracy",
+  trControl = classifier_control_cv,
+  tuneLength = 5,
+  importance = TRUE
+)
+
+cat("\nRandom Forest (Balanced, Real Only) - CV Results:\n")
+print(rf_balanced_real)
+
+cat("\nTop 10 most important features:\n")
+rf_importance_real <- varImp(rf_balanced_real)
+print(rf_importance_real, top = 10)
+```
+
+Evaluate on test data:
+
+```{r}
+# REAL
+rf_balanced_real_real_pred <- predict(rf_balanced_real, newdata = test_real_balanced)
+rf_balanced_real_real_perf <- confusionMatrix(
+  data = rf_balanced_real_real_pred,
+  reference = test_real_balanced$valence
+)
+
+cat("\nRandom Forest (Balanced, Real Only) - Real Test Videos:\n")
+print(rf_balanced_real_real_perf)
+
+cat("\nPer-class sensitivity (Real test):\n")
+print(rf_balanced_real_real_perf$byClass[, "Sensitivity"])
+
+cat("\nPer-class specificity (Real test):\n")
+print(rf_balanced_real_real_perf$byClass[, "Specificity"])
+
+# FAKE
+rf_balanced_real_fake_pred <- predict(rf_balanced_real, newdata = test_fake_balanced)
+rf_balanced_real_fake_perf <- confusionMatrix(
+  data = rf_balanced_real_fake_pred,
+  reference = test_fake_balanced$valence
+)
+
+cat("\nRandom Forest (Balanced, Real Only) - Fake Test Videos:\n")
+print(rf_balanced_real_fake_perf)
+
+cat("\nPer-class sensitivity (Fake test):\n")
+print(rf_balanced_real_fake_perf$byClass[, "Sensitivity"])
+
+cat("\nPer-class specificity (Fake test):\n")
+print(rf_balanced_real_fake_perf$byClass[, "Specificity"])
+```
+
+Findings:
+
+-   For fake video test set, accuracy is 51.06% and not significant (p = 0.09). This suggests that when trained only on real videos, the model essentially guesses randomly on fake videos. The model learns patterns from real emotions but those patterns do not apply to fakes. If emotional signals were preserved, the model should generalise.
+
+-   Positive class consistent with Analysis 1 (also 18.75% drop). Positive emotional signals are genuinely degraded in fakes. The faceswap autoencoder struggles to preserve dynamic positive expressions.
+
+-   Neutral class: fake performs better than real. This is strange - my hypothesis is that faceswap produces cleaner or more normalised neutral expressions for fakes, so the model sees the neutral expressions as a stereotypical neutral expression, whereas there is likely slightly more dynamics in real neutral.
+
+-   Negative class saw a huge 25% drop in performance for fake. Negative emotions are severely degraded in deepfakes, perhaps because negative emotional expressions are more subtle/intricate than positive and therefore harder to preserve the emotional signal.
+
+Compared to Analysis 1:
+
+-   Positive shows same degradation, regardless whether trained on both or real only. This suggests genuine signal loss. The faceswap consistently fails to preserve positive emotional dynamics.
+
+-   Negative shows greater drop in Analysis 2. In analysis 1, the model learned fake negative patterns during training, but in analysis 2, it only learned real negative patterns, which do not generalise. Suggests negative emotions are severely degraded but the model can partially adapt when exposed to fakes during training.
+
+-   Neutral shows reverse pattern in Analysis 2. Likely due to fakes having cleaner neutral expressions. Sample size makes it hard to determine.
+
+Conclusion:
+
+-   The findings suggest degradation is indeed happening for emotion. The fake test performance is not significant when trained on real only. Positive emotions are consistently degraded. Negative emotions are severely degraded too.
+
+-   If the finding that models perform better in classifying real vs fake in emotion videos was due to more movement in emotion videos, we would be seeing models trained on real videos working equally well on fake videos. Instead, we see systematic degradation specific to emotion. Different emotions show different degradation patterns.
+
+Alternative explanation:
+
+-   In the literature, positive expressions are typically much more exaggerated compared to negative, and often have more movement in the face. For example, laughing/happy would have a large smile (AU12), cheek raise (AU06), AU26 for jaw drop, etc. These all have high velocity and acceleration. On the other hand, negative emotions like angry or disgusted are often tense and subtle, like nose wrinkler (AU09) or brow lowerer (AU04) - these are smaller movements.
+
+-   The finding that positive emotions have the largest drop could be because of this.
+
+-   All we can claim so far is that different emotions show different patterns of degradation in faceswaps. Cannot definitively claim that it is due to degradation of emotion signal rather than reduced facial movement.
+
+-   This aligns too with the finding that neutral videos performed better for fake than real in analysis 2. If the faceswap method is reducing the movements in neutral expressions, there would be even less movement in an already minimal movement expression, making it much easier for the model to classify.
+
+-   To truly test this, we should do a movement analysis, where you calculate the movements of the facial muscles in each video (e.g., acceleration, velocity). You could then examine whether fakes have less movement.
+
+Table:
+
+```{r}
+# === ANALYSIS 2 BALANCED: Calculate Additional Metrics ===
+
+# RF - Real
+rf_balanced_real_real_mcc <- calc_mcc(rf_balanced_real_real_perf)
+rf_balanced_real_real_auc <- calc_multiclass_auc(rf_balanced_real, dta_test_real_balanced, dta_test_real_balanced$valence)
+
+# RF - Fake
+rf_balanced_real_fake_mcc <- calc_mcc(rf_balanced_real_fake_perf)
+rf_balanced_real_fake_auc <- calc_multiclass_auc(rf_balanced_real, dta_test_fake_balanced, dta_test_fake_balanced$valence)
+
+# === ANALYSIS 2 BALANCED SUMMARY TABLE ===
+analysis2_bal_summary <- data.frame(
+  Model = "RF",
+  Subset = c("Real", "Fake"),
+  
+  Accuracy = c(
+    rf_balanced_real_real_perf$overall["Accuracy"],
+    rf_balanced_real_fake_perf$overall["Accuracy"]
+  ),
+  
+  P_value = c(
+    rf_balanced_real_real_perf$overall["AccuracyPValue"],
+    rf_balanced_real_fake_perf$overall["AccuracyPValue"]
+  ),
+  
+  Kappa = c(
+    rf_balanced_real_real_perf$overall["Kappa"],
+    rf_balanced_real_fake_perf$overall["Kappa"]
+  ),
+  
+  MCC = c(rf_balanced_real_real_mcc, rf_balanced_real_fake_mcc),
+  
+  AUC = c(rf_balanced_real_real_auc, rf_balanced_real_fake_auc),
+  
+  Sens_Pos = c(
+    rf_balanced_real_real_perf$byClass["Class: positive", "Sensitivity"],
+    rf_balanced_real_fake_perf$byClass["Class: positive", "Sensitivity"]
+  ),
+  
+  Sens_Neu = c(
+    rf_balanced_real_real_perf$byClass["Class: neutral", "Sensitivity"],
+    rf_balanced_real_fake_perf$byClass["Class: neutral", "Sensitivity"]
+  ),
+  
+  Sens_Neg = c(
+    rf_balanced_real_real_perf$byClass["Class: negative", "Sensitivity"],
+    rf_balanced_real_fake_perf$byClass["Class: negative", "Sensitivity"]
+  ),
+  
+  Spec_Pos = c(
+    rf_balanced_real_real_perf$byClass["Class: positive", "Specificity"],
+    rf_balanced_real_fake_perf$byClass["Class: positive", "Specificity"]
+  ),
+  
+  Spec_Neu = c(
+    rf_balanced_real_real_perf$byClass["Class: neutral", "Specificity"],
+    rf_balanced_real_fake_perf$byClass["Class: neutral", "Specificity"]
+  ),
+  
+  Spec_Neg = c(
+    rf_balanced_real_real_perf$byClass["Class: negative", "Specificity"],
+    rf_balanced_real_fake_perf$byClass["Class: negative", "Specificity"]
+  )
+)
+
+# Reshape to wide format
+analysis2_bal_real <- analysis2_bal_summary[analysis2_bal_summary$Subset == "Real", -2]
+analysis2_bal_fake <- analysis2_bal_summary[analysis2_bal_summary$Subset == "Fake", -2]
+
+colnames(analysis2_bal_real)[-1] <- paste0("Real_", colnames(analysis2_bal_real)[-1])
+colnames(analysis2_bal_fake)[-1] <- paste0("Fake_", colnames(analysis2_bal_fake)[-1])
+
+analysis2_bal_wide <- merge(analysis2_bal_real, analysis2_bal_fake, by = "Model")
+
+# Format for publication
+analysis2_bal_pub <- analysis2_bal_wide %>%
+  mutate(
+    across(c(Real_Accuracy, Fake_Accuracy, Real_Kappa, Fake_Kappa, 
+             Real_MCC, Fake_MCC, Real_AUC, Fake_AUC,
+             Real_Sens_Pos, Real_Sens_Neu, Real_Sens_Neg,
+             Fake_Sens_Pos, Fake_Sens_Neu, Fake_Sens_Neg,
+             Real_Spec_Pos, Real_Spec_Neu, Real_Spec_Neg,
+             Fake_Spec_Pos, Fake_Spec_Neu, Fake_Spec_Neg), 
+           ~ sprintf("%.3f", .)),
+    Real_P_value = format_pval(Real_P_value),
+    Fake_P_value = format_pval(Fake_P_value)
+  )
+
+# Create publishable table
+kable(analysis2_bal_pub,
+      caption = "Table X. Analysis 2 (Balanced): Valence Classification Performance (Trained on Real Videos Only, Balanced)",
+      col.names = c("Model", 
+                    "Acc", "p", "κ", "MCC", "AUC", 
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−",
+                    "Acc", "p", "κ", "MCC", "AUC",
+                    "Sens+", "Sens0", "Sens−", "Spec+", "Spec0", "Spec−"),
+      align = c("l", rep("c", 22)),
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("scale_down", "hold_position"),
+                font_size = 9) %>%
+  add_header_above(c(" " = 1, 
+                     "Real Test Subset" = 11, 
+                     "Fake Test Subset" = 11))
+```
+
+```{r}
+# === VALENCE DEGRADATION ANALYSIS: KEY COMPARISON TABLE ===
+
+library(knitr)
+library(kableExtra)
+library(pROC)
+
+# Helper functions (include these earlier in your script)
+calc_mcc <- function(cm) {
+  conf_mat <- as.matrix(cm$table)
+  n <- sum(conf_mat)
+  c <- sum(diag(conf_mat))
+  s <- n
+  pk <- rowSums(conf_mat)
+  tk <- colSums(conf_mat)
+  cov_xy <- c * s - sum(pk * tk)
+  cov_xx <- s^2 - sum(pk^2)
+  cov_yy <- s^2 - sum(tk^2)
+  if (cov_xx == 0 | cov_yy == 0) return(0)
+  cov_xy / sqrt(cov_xx * cov_yy)
+}
+
+calc_multiclass_auc <- function(model, newdata, reference) {
+  probs <- predict(model, newdata = newdata, type = "prob")
+  auc_values <- sapply(levels(reference), function(class) {
+    binary_ref <- ifelse(reference == class, 1, 0)
+    if (length(unique(binary_ref)) < 2) return(NA)
+    roc_obj <- pROC::roc(binary_ref, probs[[class]], quiet = TRUE)
+    pROC::auc(roc_obj)
+  })
+  mean(auc_values, na.rm = TRUE)
+}
+
+format_pval <- function(p) {
+  ifelse(p < 0.001, "<.001", sprintf("%.3f", p))
+}
+
+# Calculate metrics for Analysis 2 Balanced (Real-Only Training)
+rf_bal_real_mcc <- calc_mcc(rf_balanced_real_real_perf)
+rf_bal_real_auc <- calc_multiclass_auc(rf_balanced_real, dta_test_real_balanced, dta_test_real_balanced$valence)
+rf_bal_fake_mcc <- calc_mcc(rf_balanced_real_fake_perf)
+rf_bal_fake_auc <- calc_multiclass_auc(rf_balanced_real, dta_test_fake_balanced, dta_test_fake_balanced$valence)
+
+# Build the comparison table
+valence_table <- data.frame(
+  Training = c("Real Only", "Real Only", ""),
+  Test_Subset = c("Real", "Fake", "Δ (Real−Fake)"),
+  
+  Accuracy = c(
+    rf_balanced_real_real_perf$overall["Accuracy"],
+    rf_balanced_real_fake_perf$overall["Accuracy"],
+    rf_balanced_real_real_perf$overall["Accuracy"] - rf_balanced_real_fake_perf$overall["Accuracy"]
+  ),
+  
+  P_value = c(
+    rf_balanced_real_real_perf$overall["AccuracyPValue"],
+    rf_balanced_real_fake_perf$overall["AccuracyPValue"],
+    NA
+  ),
+  
+  Kappa = c(
+    rf_balanced_real_real_perf$overall["Kappa"],
+    rf_balanced_real_fake_perf$overall["Kappa"],
+    rf_balanced_real_real_perf$overall["Kappa"] - rf_balanced_real_fake_perf$overall["Kappa"]
+  ),
+  
+  MCC = c(
+    rf_bal_real_mcc,
+    rf_bal_fake_mcc,
+    rf_bal_real_mcc - rf_bal_fake_mcc
+  ),
+  
+  AUC = c(
+    rf_bal_real_auc,
+    rf_bal_fake_auc,
+    rf_bal_real_auc - rf_bal_fake_auc
+  ),
+  
+  Sens_Positive = c(
+    rf_balanced_real_real_perf$byClass["Class: positive", "Sensitivity"],
+    rf_balanced_real_fake_perf$byClass["Class: positive", "Sensitivity"],
+    rf_balanced_real_real_perf$byClass["Class: positive", "Sensitivity"] - 
+      rf_balanced_real_fake_perf$byClass["Class: positive", "Sensitivity"]
+  ),
+  
+  Sens_Neutral = c(
+    rf_balanced_real_real_perf$byClass["Class: neutral", "Sensitivity"],
+    rf_balanced_real_fake_perf$byClass["Class: neutral", "Sensitivity"],
+    rf_balanced_real_real_perf$byClass["Class: neutral", "Sensitivity"] - 
+      rf_balanced_real_fake_perf$byClass["Class: neutral", "Sensitivity"]
+  ),
+  
+  Sens_Negative = c(
+    rf_balanced_real_real_perf$byClass["Class: negative", "Sensitivity"],
+    rf_balanced_real_fake_perf$byClass["Class: negative", "Sensitivity"],
+    rf_balanced_real_real_perf$byClass["Class: negative", "Sensitivity"] - 
+      rf_balanced_real_fake_perf$byClass["Class: negative", "Sensitivity"]
+  )
+)
+
+# Format for publication
+valence_table_pub <- valence_table %>%
+  mutate(
+    across(c(Accuracy, Kappa, MCC, AUC, Sens_Positive, Sens_Neutral, Sens_Negative),
+           ~ ifelse(is.na(.), "—", sprintf("%.3f", .))),
+    P_value = ifelse(is.na(P_value), "—", format_pval(P_value))
+  )
+
+# Create publishable table
+kable(valence_table_pub,
+      caption = "Table 3. Valence Classification Performance on Real vs. Fake Test Subsets (RF model trained on real videos only, balanced classes).",
+      col.names = c("Training", "Test Subset", "Acc", "p", "κ", "MCC", "AUC", 
+                    "Sens+", "Sens⁰", "Sens−"),
+      align = c("l", "l", rep("c", 8)),
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"),
+                font_size = 10) %>%
+  row_spec(3, italic = TRUE) %>%
+  footnote(general = "Sens+ = Sensitivity for positive valence (happy, laughing); Sens⁰ = neutral; Sens− = negative (angry, disgusted). Δ row shows the performance difference between real and fake test subsets.",
+           general_title = "Note: ",
+           footnote_as_chunk = TRUE)
+```
+
+DeLong CIs:
+
+```{r}
+library(pROC)
+
+# Function to calculate multiclass AUC with CI (DeLong method)
+calc_multiclass_auc_ci <- function(model, newdata, reference, ci_level = 0.95) {
+  # Get class probabilities
+  probs <- predict(model, newdata = newdata, type = "prob")
+  
+  # Calculate AUC and CI for each class (one-vs-rest)
+  auc_results <- lapply(levels(reference), function(class) {
+    binary_ref <- ifelse(reference == class, 1, 0)
+    if (length(unique(binary_ref)) < 2) {
+      return(list(auc = NA, ci_lower = NA, ci_upper = NA))
+    }
+    roc_obj <- pROC::roc(binary_ref, probs[[class]], quiet = TRUE)
+    ci_obj <- pROC::ci.auc(roc_obj, conf.level = ci_level, method = "delong")
+    
+    list(
+      auc = as.numeric(pROC::auc(roc_obj)),
+      ci_lower = ci_obj[1],
+      ci_upper = ci_obj[3]
+    )
+  })
+  
+  names(auc_results) <- levels(reference)
+  
+  # Calculate macro-averaged AUC
+  aucs <- sapply(auc_results, function(x) x$auc)
+  ci_lowers <- sapply(auc_results, function(x) x$ci_lower)
+  ci_uppers <- sapply(auc_results, function(x) x$ci_upper)
+  
+  macro_auc <- mean(aucs, na.rm = TRUE)
+  # Conservative approach: average the CIs
+  macro_ci_lower <- mean(ci_lowers, na.rm = TRUE)
+  macro_ci_upper <- mean(ci_uppers, na.rm = TRUE)
+  
+  list(
+    per_class = auc_results,
+    macro_auc = macro_auc,
+    macro_ci_lower = macro_ci_lower,
+    macro_ci_upper = macro_ci_upper
+  )
+}
+
+# Calculate for Real test subset
+auc_ci_real <- calc_multiclass_auc_ci(
+  rf_balanced_real, 
+  dta_test_real_balanced, 
+  dta_test_real_balanced$valence
+)
+
+# Calculate for Fake test subset
+auc_ci_fake <- calc_multiclass_auc_ci(
+  rf_balanced_real, 
+  dta_test_fake_balanced, 
+  dta_test_fake_balanced$valence
+)
+
+# Print results
+cat("=== Real Test Subset ===\n")
+cat(sprintf("Macro AUC: %.3f [%.3f-%.3f]\n", 
+            auc_ci_real$macro_auc, 
+            auc_ci_real$macro_ci_lower, 
+            auc_ci_real$macro_ci_upper))
+
+cat("\n=== Fake Test Subset ===\n")
+cat(sprintf("Macro AUC: %.3f [%.3f-%.3f]\n", 
+            auc_ci_fake$macro_auc, 
+            auc_ci_fake$macro_ci_lower, 
+            auc_ci_fake$macro_ci_upper))
+
+# Per-class breakdown (if needed)
+cat("\n=== Per-Class AUCs (Real) ===\n")
+for (class in names(auc_ci_real$per_class)) {
+  res <- auc_ci_real$per_class[[class]]
+  cat(sprintf("%s: %.3f [%.3f-%.3f]\n", class, res$auc, res$ci_lower, res$ci_upper))
+}
+```

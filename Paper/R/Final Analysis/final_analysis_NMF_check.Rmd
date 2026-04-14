@@ -1,0 +1,6025 @@
+---
+title: "final_analysis"
+output:
+  pdf_document: default
+---
+
+# Introduction
+
+This Rmd script will perform a sensitivity analysis to check whether the NMF step is causing a loss of predictive signal. R2 value of approx. 0.4 indicates that NMF is losing over half the variance of the original AU data. This script will check this.
+
+Changes:
+
+1.  Instead of NMF, one representative AU from each of the three components will be chosen based on previous basis matrix loadings (highest loading will be taken).
+2.  The CMFTS features will be derived from the AU time series instead.
+
+Highest loaded AUs:
+
+-   Component 1 = AU12
+
+-   Component 2 = AU17
+
+-   Component 3 = AU01
+
+# Load Libraries & Data
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# Load data
+# dta_nmf_input <- read.csv("dta_nmf_input.csv")
+
+# Load data before smoothing and normalisation
+dta_preprocessed <- read.csv("../../CSV files/OpenFace files/full_dataset_preprocessed.csv")
+```
+
+# Smooth Raw AU Data
+
+Now that I am reading in the AU data before smoothing and normalisation, I will do the smoothing step here.
+
+```{r}
+dta_preprocessed_smth <- dta_preprocessed %>%
+  group_by(video_filename) %>%
+  mutate(across(contains("_r"), ~ zoo::rollmean(., k = 4, fill = "extend", align = "left"), .names = "smth_{col}")) %>%
+  ungroup()
+```
+
+Visualise differences:
+
+```{r, fig.width=5, fig.height=5}
+# Visualise difference
+dta_preprocessed_smth %>%
+  filter(video_filename == "20__exit_phone_room") %>%
+  select(frame, AU07_r, smth_AU07_r) %>%
+  pivot_longer(cols = c(AU07_r, smth_AU07_r), names_to = "Type", values_to = "Intensity") %>%
+  ggplot(aes(x = frame, y = Intensity, color = Type)) +
+  geom_line() +
+  labs(
+    title = "AU07 - Before vs. After Smoothing",
+    x = "Frame",
+    y = "AU Intensity"
+  ) +
+  theme_minimal()
+
+
+
+dta_preprocessed_smth %>%
+  filter(video_filename == "20__exit_phone_room") %>%
+  select(frame, AU07_r, smth_AU07_r) %>%
+  tidyr::pivot_longer(
+    cols = c(AU07_r, smth_AU07_r),
+    names_to = "Type",
+    values_to = "Intensity"
+  ) %>%
+  ggplot(aes(x = frame, y = Intensity, color = Type)) +
+  
+  # --- Different styles for each line ---
+  geom_line(
+    aes(alpha = Type, linewidth = Type)
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "AU07_r"       = "#1b9e77",  # Raw
+      "smth_AU07_r"  = "#d95f02"   # Smoothed
+    ),
+    labels = c("AU07_r" = "Raw", "smth_AU07_r" = "Smoothed")
+  ) +
+  
+  # --- Transparency and line width ---
+  scale_alpha_manual(
+    values = c("AU07_r" = 0.5, "smth_AU07_r" = 1),
+    guide = "none"
+  ) +
+  scale_linewidth_manual(
+    values = c("AU07_r" = 1.1, "smth_AU07_r" = 0.8),
+    guide = "none"
+  ) +
+  
+  labs(
+    title = "AU07 - Before vs. After Smoothing",
+    x = "Frame",
+    y = "AU Intensity",
+    color = NULL
+  ) +
+  
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 18, color = "black"),
+    axis.title.y = element_text(size = 18, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 18, color = "black"),
+    axis.text.y  = element_text(size = 18, color = "black"),
+    axis.text.x  = element_text(size = 18, color = "black"),
+    plot.title   = element_text(size = 18, face = "bold", color = "black", hjust = 0.5),
+    plot.margin  = margin(10, 10, 10, 10)
+  )
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+dta_long <- dta_preprocessed_smth %>%
+  filter(video_filename == "20__exit_phone_room") %>%
+  select(frame, AU07_r, smth_AU07_r) %>%
+  tidyr::pivot_longer(
+    cols = c(AU07_r, smth_AU07_r),
+    names_to = "Type",
+    values_to = "Intensity"
+  )
+
+base_theme <- theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.title.y = element_text(size = 18, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 18, color = "black"),
+    axis.text.y  = element_text(size = 16, color = "black"),
+    axis.text.x  = element_text(size = 16, color = "black"),
+    plot.title   = element_text(size = 18, face = "bold", color = "black", hjust = 0.5),
+    plot.margin  = margin(10, 10, 10, 10)
+  )
+
+# Raw
+p_raw <- dta_long %>%
+  filter(Type == "AU07_r") %>%
+  ggplot(aes(x = frame, y = Intensity)) +
+  geom_line(color = "#1b9e77", alpha = 0.6, linewidth = 0.8) +
+  labs(
+    title = "AU07 (Raw)",
+    x = NULL,
+    y = "AU Intensity"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  base_theme
+
+# Smoothed
+p_smth <- dta_long %>%
+  filter(Type == "smth_AU07_r") %>%
+  ggplot(aes(x = frame, y = Intensity)) +
+  geom_line(color = "#d95f02", linewidth = 0.8) +
+  labs(
+    title = "AU07 (Smoothed)",
+    x = "Frame",
+    y = "AU Intensity"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  base_theme
+
+# Patchwork for final figure
+p_final <- p_raw / p_smth +
+  plot_annotation(
+    title = "AU07 - Before vs. After Smoothing",
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5, color = "black")
+    )
+  )
+
+# Save with high dpi
+ggsave(
+  filename = "AU07_smoothing_comparison.tiff",
+  plot = p_final,
+  width = 5,
+  height = 5,
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+
+# PDF better for PNAS
+ggsave(
+  filename = "AU07_smoothing_comparison.pdf",
+  plot = p_final,
+  width = 5,
+  height = 5,
+  device = cairo_pdf
+)
+
+p_final
+
+```
+
+```{r, fig.width=5, fig.height=2.5}
+# Save raw and smooth separately
+p_raw
+p_smth
+
+ggsave(
+  filename = "au07_raw.pdf",
+  p_raw,
+  width = 5,
+  height = 2.5,
+  device = cairo_pdf
+)
+
+ggsave(
+  filename = "au07_smth.pdf",
+  p_smth,
+  width = 5,
+  height = 2.5,
+  device = cairo_pdf
+)
+```
+
+# Split Data 80/20
+
+First need to add the emotion column, easier to do that first:
+
+```{r}
+# Function to add emotion column
+add_emotion_column <- function(df) {
+  df %>%
+    mutate(
+      emotion = case_when(
+        str_detect(video_filename, "_laughing") ~ "yes",
+        str_detect(video_filename, "_happy") ~ "yes",
+        str_detect(video_filename, "_serious") ~ "yes",
+        str_detect(video_filename, "_angry") ~ "yes",
+        str_detect(video_filename, "_disgusted") ~ "yes",
+        TRUE ~ "no"
+      ),
+      emotion = factor(emotion, levels = c("yes", "no"))
+    )
+}
+
+add_emotion_type_column <- function(df) {
+  df %>%
+    mutate(
+      emotion_type = case_when(
+        str_detect(video_filename, "_laughing")  ~ "laughing",
+        str_detect(video_filename, "_happy")     ~ "happy",
+        str_detect(video_filename, "_serious")   ~ "serious",
+        str_detect(video_filename, "_angry")     ~ "angry",
+        str_detect(video_filename, "_disgusted") ~ "disgusted",
+        TRUE                                     ~ "neutral" 
+      ),
+      
+      # Valence column
+      valence = case_when(
+        emotion_type %in% c("laughing", "happy") ~ "positive",
+        emotion_type %in% c("angry", "disgusted") ~ "negative",
+        emotion_type %in% c("serious", "neutral") ~ "neutral"
+      ),
+      
+      emotion_type = factor(emotion_type),
+      valence = factor(valence, levels = c("positive", "neutral", "negative"))
+    )
+}
+
+
+dta_nmf_input <- add_emotion_column(dta_preprocessed_smth)
+dta_nmf_input <- add_emotion_type_column(dta_nmf_input)
+# Reorder columns
+dta_nmf_input <- dta_nmf_input %>%
+  select(video_filename, corresponding_video, scene_name, isfakeorreal, emotion, emotion_type, valence, frame, everything())
+# Check order is correct
+colnames(dta_nmf_input)
+```
+
+Now to create the train and test splits:
+
+```{r}
+set.seed(12345)
+
+real_videos <- dta_nmf_input %>%
+  filter(isfakeorreal == "real") %>%
+  distinct(video_filename)
+
+# Sample 80% of real videos for train set
+train_real_videos <- sample(real_videos$video_filename,
+                            size = floor(0.8 * nrow(real_videos)))
+
+# Get corresponding fake videos for selected real videos
+train_fake_videos <- dta_nmf_input %>%
+  filter(video_filename %in% train_real_videos) %>%
+  pull(corresponding_video) %>%
+  unique()
+
+# Train set
+dta_nmf_input_train <- dta_nmf_input %>%
+  filter(video_filename %in% c(train_real_videos, train_fake_videos))
+
+# Test set is everything else
+dta_nmf_input_test <- dta_nmf_input %>%
+  filter(!video_filename %in% c(train_real_videos, train_fake_videos))
+
+
+# Check distribution
+print(length(unique(dta_nmf_input_train$video_filename)))
+print(length(unique(dta_nmf_input_test$video_filename)))
+
+# Check pairs are preserved
+train_videos <- unique(dta_nmf_input_train$video_filename)
+test_videos <- unique(dta_nmf_input_test$video_filename)
+
+train_corresponding_videos <- dta_nmf_input %>%
+  filter(video_filename %in% train_videos) %>%
+  pull(corresponding_video) %>%
+  unique()
+
+if (length(intersect(train_corresponding_videos, test_videos)) == 0) {
+  cat("Success.\n")
+} else {
+  cat("Error, the following pairs were split:\n")
+  print(intersect(train_corresponding_videos, test_videos))
+}
+```
+
+Training set: 370 videos
+
+Test set: 94 videos
+
+Additional checks confirmed the pairs are preserved and not split across train and test sets.
+
+# Balance Classes
+
+First we need to see the distribution of classes in both train and test sets.
+
+```{r}
+# # Training set
+# cat("Training set:\n")
+# table(dta_nmf_input_train$isfakeorreal, dta_nmf_input_train$emotion)
+# 
+# # Test set
+# cat("\nTest set:\n")
+# table(dta_nmf_input_test$isfakeorreal, dta_nmf_input_test$emotion)
+
+
+# Get actual number of unique videos in train set.
+dta_nmf_input_train %>%
+  distinct(video_filename, emotion) %>%
+  count(emotion)
+
+# Get actual number of unique videos in test set.
+dta_nmf_input_test %>%
+  distinct(video_filename, emotion) %>%
+  count(emotion)
+
+# Emotion types
+dta_nmf_input_train %>%
+  distinct(video_filename, emotion_type) %>%
+  count(emotion_type)
+dta_nmf_input_test %>%
+  distinct(video_filename, emotion_type) %>%
+  count(emotion_type)
+
+# Valence
+dta_nmf_input_train %>%
+  distinct(video_filename, valence) %>%
+  count(valence)
+dta_nmf_input_test %>%
+  distinct(video_filename, valence) %>%
+  count(valence)
+```
+
+In the training set:
+
+-   222 emotion
+
+-   148 no emotion
+
+There is a mild imbalance of emotion vs. no emotion videos (60/40). I could undersample here but it would be throwing away a lot of data. Instead I could oversample using something like SMOTE, although this would have to be done after CMFTS feature extraction as techniques like SMOTE are not really suitable for time series, high dimensional data like this.
+
+UPDATE:
+
+Upsampling cannot be used at this stage due to the complexity of the data, and also cannot be done at the CMFTS feature stage due to not having associated real/fake labels for the new data. Instead, downsampling will be the only available sampling option and will have to occur at this point before NMF. This will have to preserve video pairs too.
+
+# Normalisation
+
+This step will correctly apply normalisation to the videos, in a way that does not lose inter-video variation.
+
+```{r}
+au_cols <- names(dta_nmf_input_train)[grepl("^smth_AU", names(dta_nmf_input_train))]
+
+# Learn scaling params from train set only
+norm_params <- list()
+for (col in au_cols) {
+  mean_val <- mean(dta_nmf_input_train[[col]], na.rm = T)
+  sd_val <- sd(dta_nmf_input_train[[col]], na.rm = T)
+  
+  # Handle AUs with zero SD
+  if (is.na(sd_val) || sd_val == 0) {
+    sd_val <- 1  # To prevent division by zero
+  }
+  
+  norm_params[[col]] <- c(mean = mean_val, sd = sd_val)
+}
+
+# Create function to apply z-score and non-negative shift
+fn_z_score_shift <- function(x, mean_val, sd_val) {
+  z <- (x - mean_val) / sd_val
+  # Shift for non-negativity
+  z_shifted <- z - min(z, na.rm = T)
+  z_shifted[is.na(z_shifted)] <- 0
+  return(z_shifted)
+}
+
+
+# Apply params to both train and test sets
+dta_nmf_input_train <- dta_nmf_input_train
+dta_nmf_input_test <- dta_nmf_input_test
+
+for (col in au_cols) {
+  params <- norm_params[[col]]
+  
+  # Apply to train
+  dta_nmf_input_train[[col]] <- fn_z_score_shift(dta_nmf_input_train[[col]],
+                                                      params["mean"], params["sd"])
+  dta_nmf_input_test[[col]] <- fn_z_score_shift(dta_nmf_input_test[[col]],
+                                                      params["mean"], params["sd"])
+}
+```
+
+Clean up columns:
+
+```{r}
+# Remove original AU columns + confidence, success, timestamp
+dta_nmf_input_train <- dta_nmf_input_train[, -(9:28)]
+dta_nmf_input_test <- dta_nmf_input_test[, -(9:28)]
+
+# Rename AU cols
+dta_nmf_input_train <- dta_nmf_input_train %>%
+  rename(
+    AU01_inner_brow_raiser = smth_AU01_r,
+    AU02_outer_brow_raiser = smth_AU02_r,
+    AU04_brow_lowerer = smth_AU04_r,
+    AU05_upper_lid_raiser = smth_AU05_r,
+    AU06_cheek_raiser = smth_AU06_r,
+    AU07_lid_tightener = smth_AU07_r,
+    AU09_nose_wrinkler = smth_AU09_r,
+    AU10_upper_lip_raiser = smth_AU10_r,
+    AU12_lip_corner_puller = smth_AU12_r,
+    AU14_dimpler = smth_AU14_r,
+    AU15_lip_corner_depressor = smth_AU15_r,
+    AU17_chin_raiser = smth_AU17_r,
+    AU20_lip_stretcher = smth_AU20_r,
+    AU23_lip_tightener = smth_AU23_r,
+    AU25_lips_part = smth_AU25_r,
+    AU26_jaw_drop = smth_AU26_r,
+    AU45_blink = smth_AU45_r
+  )
+
+dta_nmf_input_test <- dta_nmf_input_test %>%
+  rename(
+    AU01_inner_brow_raiser = smth_AU01_r,
+    AU02_outer_brow_raiser = smth_AU02_r,
+    AU04_brow_lowerer = smth_AU04_r,
+    AU05_upper_lid_raiser = smth_AU05_r,
+    AU06_cheek_raiser = smth_AU06_r,
+    AU07_lid_tightener = smth_AU07_r,
+    AU09_nose_wrinkler = smth_AU09_r,
+    AU10_upper_lip_raiser = smth_AU10_r,
+    AU12_lip_corner_puller = smth_AU12_r,
+    AU14_dimpler = smth_AU14_r,
+    AU15_lip_corner_depressor = smth_AU15_r,
+    AU17_chin_raiser = smth_AU17_r,
+    AU20_lip_stretcher = smth_AU20_r,
+    AU23_lip_tightener = smth_AU23_r,
+    AU25_lips_part = smth_AU25_r,
+    AU26_jaw_drop = smth_AU26_r,
+    AU45_blink = smth_AU45_r
+  )
+```
+
+# Representative AUs
+
+```{r}
+# Will keep the name dta_nmf_output for simplicity
+
+# Only select representative AUs
+dta_nmf_input_train <- dta_nmf_input_train %>%
+  select(
+    "video_filename",
+    "isfakeorreal",
+    "emotion",
+    "valence",
+    "frame",
+    "AU01_inner_brow_raiser",
+    "AU12_lip_corner_puller",
+    "AU17_chin_raiser"
+  )
+
+dta_nmf_input_test <- dta_nmf_input_test %>%
+  select(
+    "video_filename",
+    "isfakeorreal",
+    "emotion",
+    "valence",
+    "frame",
+    "AU01_inner_brow_raiser",
+    "AU12_lip_corner_puller",
+    "AU17_chin_raiser"
+  )
+
+# The equivalent of dta_nmf_output
+dta_nmf_output <- dta_nmf_input_train
+
+```
+
+## Visualisations
+
+```{r}
+# Function for min-max normalisation, used in visualisations
+fn_maxnormalise <- function(x, ...) {
+  rng <- range(x, na.rm = TRUE)
+  if (anyNA(rng) || diff(rng) == 0) {
+    return(rep(0, length(x)))  # safe fallback: all 0s
+  } else {
+    return((x - rng[1]) / diff(rng))
+  }
+}
+```
+
+```{r}
+dta_nmf_output %>%
+  pivot_longer(
+    cols = starts_with("AU"),
+    names_to = "AU",
+    values_to = "Activation"
+  ) %>%
+  group_by(video_filename, AU) %>%
+  mutate(Activation = fn_maxnormalise(Activation)) %>%
+  ungroup() %>%
+  # Average across videos for each frame & AU
+  group_by(isfakeorreal, AU, frame) %>%
+  summarise(Activation = mean(Activation, na.rm=TRUE)) %>%
+  # Normalise again by AU
+  group_by(AU)%>%
+  mutate(Activation = fn_maxnormalise(Activation))%>%
+  ungroup() %>%
+  # Plot heatmap
+  ggplot( aes(x = frame, y = AU, fill = Activation)) +
+  geom_tile() +
+  facet_wrap(~ isfakeorreal, ncol = 2) +
+  scale_fill_gradientn(colours = viridis::magma(100)) +
+  labs(
+    title = "Heatmap of Averaged Representative AU Activations",
+    x = "Frame",
+    y = "AU",
+    fill = "Activation"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 14)) 
+```
+
+```{r}
+# Real vs. fake
+dta_nmf_output %>%
+  pivot_longer(
+    cols = starts_with("AU"),
+    names_to = "AU",
+    values_to = "Activation"
+  ) %>%
+  # Normalise within each video and AU
+  group_by(video_filename, AU) %>%
+  mutate(Activation = fn_maxnormalise(Activation)) %>%
+  ungroup() %>%
+  # Average across videos (by AU and frame)
+  group_by(isfakeorreal, AU, frame) %>%
+  summarise(Activation = mean(Activation, na.rm = TRUE)) %>%
+  # Normalise averaged values within each AU
+  group_by(AU) %>%
+  mutate(Activation = fn_maxnormalise(Activation)) %>%
+  ungroup() %>%
+  # Plot
+  ggplot(aes(x = frame, y = Activation, colour = AU)) +
+  geom_smooth() +
+  facet_wrap(~ isfakeorreal, ncol = 1) +
+  labs(
+    title = "Representative AU Activations Over Time (Real vs. Fake)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 14)  # Increase font size for facet labels
+  )
+```
+
+# CMFTS Features
+
+## Install CMFTS Package
+
+```{r}
+# Install dependencies
+#devtools::install_github("cbergmeir/tsExpKit")
+
+# Install CMFTS package (uncomment if first run)
+#devtools::install_github("fjbaldan/CMFTS")
+```
+
+## Perform CMFTS Feature Extraction
+
+```{r}
+dta_cmfts_input <- dta_nmf_output %>%
+  select(video_filename, isfakeorreal, emotion, valence, frame, AU01_inner_brow_raiser, AU12_lip_corner_puller, AU17_chin_raiser) %>%
+  pivot_longer(cols = c("AU01_inner_brow_raiser", "AU12_lip_corner_puller", "AU17_chin_raiser"),
+               names_to = "AU",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_input), value = TRUE)
+
+head(dta_cmfts_input)
+```
+
+Function for calculating CMFTS features:
+
+```{r}
+fn_extract_cmfts_features <- function(ts_values) {
+  ts_matrix <- matrix(as.numeric(ts_values), nrow = 1)
+  cmfts_features <- cmfts::cmfts(dataset = ts_matrix)
+  return(cmfts_features)
+}
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_output <- apply(
+  dta_cmfts_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_input[, c("video_filename", "isfakeorreal", "emotion", "valence", "AU")],
+    .
+  )
+
+head(dta_cmfts_output)
+```
+
+## CMFTS Pre-Processing
+
+First step is to concatenate the data so that each video has one row. This will result in each CMFTS feature having three columns (one for each NMF component). This is to make the data a suitable format for classifiers. More on this in `full_dataset_NMF_analysis.Rmd`.
+
+```{r}
+dta_cmfts_output_concat <- dta_cmfts_output %>%
+  pivot_wider(
+    names_from = AU,
+    values_from = -c(video_filename, AU),
+    names_glue = "{.value}_{AU}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -3:-6]
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -5:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_output_concat)[3] <- c("emotion")
+colnames(dta_cmfts_output_concat)[4] <- c("valence")
+
+head(dta_cmfts_output_concat)
+```
+
+### Missing Values
+
+```{r}
+dta_cmfts_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+Permutation entropy has all missing values, but some other columns also have a few missing values. I will just remove permutation entropy and impute the rest in the missForest step.
+
+```{r}
+# Drop permutation entropy columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -14:-16]
+```
+
+### Infinite Values
+
+```{r}
+dta_cmfts_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Only Shannon entropy columns have infinite values. This time, there are quite a lot of infinite values, some columns are majority infinite. It is unlikely that missForest imputation will be able to successfully impute based on such little data. Therefore, I will remove Shannon entropy columns and impute other columns with NA values using missForest.
+
+The reason why there are so many inf values is likely to be that some AU values are constant (e.g., if they are not activated in a video).
+
+```{r}
+# Remove shannon entropy CS columns
+dta_cmfts_output_concat <- dta_cmfts_output_concat[, -14:-16]
+```
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_output_concat)) {
+  dta_cmfts_output_concat[[col]][is.infinite(dta_cmfts_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_output_imputed <- dta_cmfts_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_output_imputed[, sapply(dta_cmfts_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE: \< 0.0001
+
+### Features with Zero SD
+
+Features with SD = 0 contribute no meaningful information and can be removed.
+
+```{r}
+sds_train <- sapply(dta_cmfts_output_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+features_to_keep <- names(sds_train)[is.na(sds_train) | sds_train > 0]
+
+# Drop features with zero SD
+dta_cmfts_output_imputed_zerosd <- dta_cmfts_output_imputed[, features_to_keep]
+```
+
+This has removed 9 features.
+
+# Feature Selection
+
+## Correlation
+
+Starting with a quick correlation-based elimination is a good way to find out which columns can be removed to reduce pairwise correlations. Columns that are highly correlated with one another are likely to be redundant for the classifier.
+
+```{r}
+# Cutoff 0.9
+cat("ZeroSD\n\nCutoff = 0.9\n")
+caret::findCorrelation(cor(dta_cmfts_output_imputed_zerosd[, 5:112]), cutoff = 0.9)
+
+# Cutoff 0.95
+cat("\nCutoff = 0.95\n")
+caret::findCorrelation(cor(dta_cmfts_output_imputed_zerosd[, 5:112]), cutoff = 0.95)
+```
+
+A cutoff of 0.9 flagged 14 features for removal due to being highly correlated with at least one other feature. A cutoff point of 0.95 flagged 1 feature for removal.
+
+## Recursive Feature Elimination (RFE)
+
+```{r}
+x_train_zerosd <- dta_cmfts_output_imputed_zerosd[, 5:112]
+y_train_zerosd <- as.factor(dta_cmfts_output_imputed_zerosd$isfakeorreal)
+# y_train_zerosd <- as.factor(dta_cmfts_output_imputed_zerosd$valence)
+
+# Set up RFE control using random forest (fitting params)
+control <- caret::rfeControl(functions = caret::rfFuncs,
+                      method = "cv",
+                      number = 10,
+                      verbose = TRUE)  # 10-fold cross validation
+
+# Define subset sizes to evaluate
+# Model will start with 5 predictors, incrementing by 5
+subsetSizes <- seq(5, ncol(x_train_zerosd), by = 5)
+
+# RFE
+set.seed(12345)
+rfeResults_zerosd <- caret::rfe(x = x_train_zerosd,
+                     y = y_train_zerosd,
+                     sizes = subsetSizes,
+                     rfeControl = control)
+
+# Results
+print(rfeResults_zerosd)
+plot(rfeResults_zerosd)
+```
+
+RFE identified an optimal subset of 5 features (Accuracy = 53.74, Kappa = 0.075).
+
+Top 5:
+
+1.  Diff1x_pacf5_AU17
+2.  Diff2x_pacf5_AU17
+3.  Diff2_acf10_AU12
+4.  spectral_entropy_AU12
+5.  Diff1x_pacf5_AU12
+
+## Boruta
+
+```{r, fig.height=8, fig.width=10}
+set.seed(12345)
+
+# Create a subset of data including only the outcome and predictors
+boruta_train_zsd <- dta_cmfts_output_imputed_zerosd[, c("isfakeorreal",
+                                                        names(dta_cmfts_output_imputed_zerosd)[5:112])]
+
+# boruta_train_zsd <- dta_cmfts_output_imputed_zerosd[, c("valence", 
+#                                                         names(dta_cmfts_output_imputed_zerosd)[6:116])]
+
+# Make sure outcome variable is factor
+boruta_train_zsd$isfakeorreal <- as.factor(boruta_train_zsd$isfakeorreal)
+# boruta_train_zsd$valence <- as.factor(boruta_train_zsd$valence)
+
+# Boruta
+boruta_output_zsd <- Boruta::Boruta(isfakeorreal ~ ., data = boruta_train_zsd, doTrace = 2)
+# boruta_output_zsd <- Boruta::Boruta(valence ~ ., data = boruta_train_zsd, doTrace = 2)
+
+# Output
+# print(boruta_output_zsd)
+# plot(boruta_output_zsd, las = 2)
+
+# Solve tentative features
+Boruta::TentativeRoughFix(boruta_output_zsd)
+
+# Output
+print(boruta_output_zsd)
+par(mar = c(12, 4, 4, 2) + 0.1)
+plot(Boruta::TentativeRoughFix(boruta_output_zsd), las = 2)
+
+# Solve tentative features
+Boruta::TentativeRoughFix(boruta_output_zsd)
+
+# get only important features
+print(Boruta::getSelectedAttributes(boruta_output_zsd, withTentative = F))
+
+# ranked
+# 1. Get statistics for all attributes, including their median importance
+feature_stats <- Boruta::attStats(boruta_output_zsd)
+
+# 2. Add the feature names as a column to the data frame
+feature_stats$features <- rownames(feature_stats)
+
+# 3. Filter for only "Confirmed" features and sort by importance (descending)
+ranked_features <- feature_stats %>%
+  #dplyr::filter(decision == "Confirmed") %>%
+  dplyr::arrange(desc(medianImp))
+
+# Print the ranked table
+print(ranked_features)
+
+# To get just a vector of the ranked feature names:
+ranked_feature_names <- ranked_features$features
+print(ranked_feature_names)
+```
+
+Boruta finds 3 important features (8 after tentative rough fixing):
+
+1.  diff1x_pacf5_AU17
+2.  diff1x_pacf5_AU01
+3.  diff2_acf1_AU01
+4.  diff2_acf10_AU12
+5.  max_kl_shift_AU12
+6.  diff1_acf1_AU12
+7.  lumpiness_AU12
+8.  diff2_acf1_AU12
+
+Boruta graph:
+
+```{r, fig.height=8}
+par(mar = c(12, 5, 4, 2) + 0.1)
+
+boruta_fixed <- Boruta::TentativeRoughFix(boruta_output_zsd)
+plot(boruta_fixed, 
+     las = 3,  # Keep vertical labels
+     main = "",
+     ylab = "Z-Score Importance",
+     xlab = "",
+     cex.axis = 0.8,
+     cex.main = 2,
+     cex.lab = 1.4
+)
+
+
+# Save to pdf
+pdf("fig2_panel_A.pdf", width = 12, height = 8)
+
+par(mar = c(18, 5, 4, 2) + 0.1)
+
+boruta_fixed <- Boruta::TentativeRoughFix(boruta_output_zsd)
+plot(boruta_fixed, 
+     las = 3,  # Keep vertical labels
+     main = "",
+     ylab = "Z-Score Importance",
+     xlab = "",
+     cex.axis = 0.8,
+     cex.main = 2,
+     cex.lab = 1.4
+)
+dev.off()
+```
+
+# Create Test Set
+
+## Create Final Test Set
+
+```{r}
+dta_nmf_test_output <- dta_nmf_input_test
+```
+
+## Calculate CMFTS Features
+
+The next step is to take the projected NMF values and calculate CMFTS features in the same way as before.
+
+```{r}
+dta_cmfts_test_input <- dta_nmf_test_output %>%
+  select(video_filename, isfakeorreal, emotion, valence, frame, AU01_inner_brow_raiser, AU12_lip_corner_puller, AU17_chin_raiser) %>%
+  pivot_longer(cols = c("AU01_inner_brow_raiser", "AU12_lip_corner_puller", "AU17_chin_raiser"),
+               names_to = "AU",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_cmfts_test_input), value = TRUE)
+
+head(dta_cmfts_test_input)
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_cmfts_test_output <- apply(
+  dta_cmfts_test_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_cmfts_test_input[, c("video_filename", "isfakeorreal", "emotion", "valence", "AU")],
+    .
+  )
+
+head(dta_cmfts_test_output)
+```
+
+Now time to preprocess in the same way as before.
+
+## CMFTS Preprocessing
+
+```{r}
+dta_cmfts_test_output_concat <- dta_cmfts_test_output %>%
+  pivot_wider(
+    names_from = AU,
+    values_from = -c(video_filename, AU),
+    names_glue = "{.value}_{AU}"
+  )
+
+# Remove duplicate columns
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -3:-6]
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -5:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_cmfts_test_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_cmfts_test_output_concat)[3] <- c("emotion")
+colnames(dta_cmfts_test_output_concat)[4] <- c("valence")
+
+head(dta_cmfts_test_output_concat)
+```
+
+Missing values:
+
+```{r}
+dta_cmfts_test_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+```{r}
+# Drop permutation entropy columns
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -14:-16]
+```
+
+Infinite values:
+
+```{r}
+dta_cmfts_test_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Remove shannon entropy CS columns:
+
+```{r}
+dta_cmfts_test_output_concat <- dta_cmfts_test_output_concat[, -14:-16]
+```
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_cmfts_test_output_concat)) {
+  dta_cmfts_test_output_concat[[col]][is.infinite(dta_cmfts_test_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_test_output_imputed <- dta_cmfts_test_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_test_output_imputed[, sapply(dta_cmfts_test_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_test_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE = \< 0.00001
+
+Features with Zero SD:
+
+```{r}
+# sds_zerosd <- sapply(dta_cmfts_test_output_imputed, function(x) {
+#   if(is.numeric(x)) sd(x, na.rm=T) else NA
+# })
+# 
+# # List features that do not meet the threshold
+# names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_test_output_imputed_zerosd <- dta_cmfts_test_output_imputed[, features_to_keep]
+```
+
+The test set is ready: `dta_cmfts_test_output_imputed_zerosd`.
+
+# Imbalanced Emotion Class
+
+As we saw earlier, there is an imbalance in the emotion class (222 emotion, 148 no emotion). Now that we have the CMFTS features, we can apply SMOTE upsamping. SMOTE is better suited to the CMFTS data as it is not high dimensional or a time series, unlike the AU data before NMF.
+
+```{r}
+# # Make sure emotion column is factor
+# dta_cmfts_output_imputed_zerosd$emotion <- as.factor(
+#   dta_cmfts_output_imputed_zerosd$emotion
+# )
+# 
+# # Show class imbalance before
+# cat("Before SMOTE:\n")
+# print(table(dta_cmfts_output_imputed_zerosd$emotion))
+# 
+# # SMOTE recipe
+# smote_recipe <- recipes::recipe(emotion ~ ., data = dta_cmfts_output_imputed_zerosd) %>%
+#   recipes::update_role(video_filename, isfakeorreal, new_role = "ID") %>%
+#   themis::step_smote(emotion, over_ratio = 1) %>%  # over_ratio = 1 upsampling minority
+#   recipes::prep()
+# 
+# dta_cmfts_emotion_balanced <- recipes::bake(smote_recipe, new_data = NULL)
+# 
+# # Class balance after
+# cat("\nAfter SMOTE:\n")
+# print(table(dta_cmfts_emotion_balanced$emotion))
+```
+
+The final balanced training set is `dta_cmfts_emotion_balanced`.
+
+UPDATE:
+
+This cannot be used for model training as the new rows do not have associated real/fake labels. Instead, we can oversample using bootstrapping.
+
+```{r}
+set.seed(12345)
+
+# Separate the minority and majority
+majority_data <- dta_cmfts_output_imputed_zerosd %>%
+  filter(emotion == "yes")
+
+minority_data <- dta_cmfts_output_imputed_zerosd %>%
+  filter(emotion == "no")
+
+# Bootstrapping on minority class
+minority_data_oversampled <- minority_data %>%
+  sample_n(size = nrow(majority_data), replace = TRUE)
+
+# Combine to create balanced dta
+dta_cmfts_emotion_balanced <- bind_rows(majority_data, minority_data_oversampled)
+
+# Verify
+cat("Before:\n")
+print(table(dta_cmfts_output_imputed_zerosd$emotion))
+
+cat("\nAfter:\n")
+print(table(dta_cmfts_emotion_balanced$emotion))
+```
+
+Balancing valence:
+
+-   Balancing the emotion_type class will be too extreme since the minority class has 6 and the majority class has 148.
+
+```{r}
+set.seed(12345)
+
+target_size <- nrow(dta_cmfts_output_imputed_zerosd %>% filter(valence == "neutral"))
+
+# Separate data into the three classes
+neutral_data <- dta_cmfts_output_imputed_zerosd %>% filter(valence == "neutral")
+positive_data <- dta_cmfts_output_imputed_zerosd %>% filter(valence == "positive")
+negative_data <- dta_cmfts_output_imputed_zerosd %>% filter(valence == "negative")
+
+# Oversample minority classes to match target size
+positive_data <- positive_data %>%
+  sample_n(size = target_size, replace = T)
+negative_data <- negative_data %>%
+  sample_n(size = target_size, replace = T)
+
+# Combine into new df
+dta_cmfts_valenced_balanced <- bind_rows(neutral_data, positive_data, negative_data)
+
+# Check
+cat("Before:\n")
+print(table(dta_cmfts_output_imputed_zerosd$valence))
+cat("After:\n")
+print(table(dta_cmfts_valenced_balanced$valence))
+
+```
+
+# Classifiers
+
+I will create two models for each classifier.
+
+-   Model 1 = Only features confirmed as important by Boruta (n=2)
+
+-   Model 2 = Same feature types but across all components (n=6)
+
+The reason for this stems from the idea that the three NMF components represent interrelated aspects of facial expression, so if a feature type was most discriminative for one component, its behaviour in other components might still hold relevant information for classification.
+
+```{r}
+set.seed(12345)
+
+# Train set (UNCOMMENT FOR IMBALANCED EMOTION)
+# dta_cmfts_output_imputed_zerosd$isfakeorreal <- factor(
+#   dta_cmfts_output_imputed_zerosd$isfakeorreal,
+#   levels = c("real", "fake")
+# )
+
+dta_cmfts_emotion_balanced$isfakeorreal <- factor(
+  dta_cmfts_emotion_balanced$isfakeorreal,
+  levels = c("real", "fake")
+)
+
+# dta_cmfts_valenced_balanced$valence <- factor(
+#   dta_cmfts_valenced_balanced$valence,
+#   levels = c("positive", "neutral", "negative")
+# )
+
+
+
+# UNCOMMENT FOR REAL/FAKE PREDICTION
+boruta_selected_features <- c(
+  "diff1x_pacf5_AU17_chin_raiser",
+  "diff1x_pacf5_AU01_inner_brow_raiser",
+  "diff2_acf1_AU01_inner_brow_raiser",
+  "diff2_acf10_AU12_lip_corner_puller",
+  "max_kl_shift_AU12_lip_corner_puller",
+  "diff1_acf1_AU12_lip_corner_puller",
+  "lumpiness_AU12_lip_corner_puller",
+  "diff2_acf1_AU12_lip_corner_puller"
+)
+
+# # Valence
+# boruta_selected_features <- c(
+#   "shannon_entropy_CS_nmf1",
+#   "shannon_entropy_CS_nmf3",
+#   "shannon_entropy_SG_nmf2",
+#   "shannon_entropy_SG_nmf3",
+#   "linearity_nmf3"
+# )
+
+# Select these features plus the outcome variable
+dta_classifier_train_new <- dta_cmfts_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+dta_classifier_train_new_balanced <- dta_cmfts_emotion_balanced %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+# UNCOMMENT FOR REAL FAKE
+# dta_classifier_train_new <- dta_cmfts_emotion_balanced %>%
+#   select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+# Valence
+# dta_classifier_train_new <- dta_cmfts_valenced_balanced %>%
+#   select(video_filename, isfakeorreal, emotion_type, valence, all_of(boruta_selected_features))
+
+
+
+# Test set
+dta_cmfts_test_output_imputed_zerosd$isfakeorreal <- factor(
+  dta_cmfts_test_output_imputed_zerosd$isfakeorreal,
+  levels = c("real", "fake")
+)
+
+dta_classifier_test_new <- dta_cmfts_test_output_imputed_zerosd %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+dta_classifier_test_new$video_filename <- dta_cmfts_test_output_imputed_zerosd$video_filename
+
+# Valence
+# dta_cmfts_test_output_imputed_zerosd$valence <- factor(
+#   dta_cmfts_test_output_imputed_zerosd$valence,
+#   levels = c("positive", "neutral", "negative")
+# )
+# 
+# dta_classifier_test_new <- dta_cmfts_test_output_imputed_zerosd %>%
+#   select(video_filename, isfakeorreal, emotion_type, valence, all_of(boruta_selected_features))
+# 
+# dta_classifier_test_new_all <- dta_cmfts_test_output_imputed_zerosd %>%
+#   select(video_filename, isfakeorreal, emotion_type, valence, all_of(all_component_features))
+# 
+# dta_classifier_test_new$video_filename <- dta_cmfts_test_output_imputed_zerosd$video_filename
+```
+
+## Normalise Features
+
+Non-decision tree classifiers are sensitive to the scale of the features. This section will scale the CMFTS features in the same way as the AU data previously.
+
+```{r}
+# Columns to be scaled
+feature_columns <- names(dta_classifier_train_new)[!names(dta_classifier_train_new) %in% c("video_filename", "emotion", "isfakeorreal")]
+
+# Scaling params from training set
+scaling_model <- caret::preProcess(dta_classifier_train_new[, feature_columns],
+                                   method = c("center", "scale"))  # z-score norm
+
+# Save scaling model for human comparison analyses
+saveRDS(scaling_model, "models/scaling_model_AUs.RDS")
+
+model_au_features <- c(
+  "diff1x_pacf5_AU17_chin_raiser",
+  "diff1x_pacf5_AU01_inner_brow_raiser",
+  "diff2_acf1_AU01_inner_brow_raiser",
+  "diff2_acf10_AU12_lip_corner_puller",
+  "max_kl_shift_AU12_lip_corner_puller",
+  "diff1_acf1_AU12_lip_corner_puller",
+  "lumpiness_AU12_lip_corner_puller",
+  "diff2_acf1_AU12_lip_corner_puller"
+)
+
+cat("Verification of regenerated scaling_model:\n")
+test <- predict(scaling_model, newdata = dta_classifier_train_new[, feature_columns])
+cat("Means (should be ~0):\n")
+print(round(colMeans(test[, model_au_features]), 4))
+cat("SDs (should be ~1):\n")
+print(round(apply(test[, model_au_features], 2, sd), 4))
+
+# Create new scaled data by applying learned params
+# Train set
+dta_classifier_train_new_scaled <- dta_classifier_train_new
+dta_classifier_train_new_scaled[, feature_columns] <- predict(scaling_model,
+                                                              newdata = dta_classifier_train_new[, feature_columns])
+
+# For balanced train set
+dta_classifier_train_new_balanced_scaled <- dta_classifier_train_new_balanced
+dta_classifier_train_new_balanced_scaled[, feature_columns] <- predict(scaling_model,
+                                                              newdata = dta_classifier_train_new_balanced[, feature_columns])
+
+# Test set
+dta_classifier_test_new_scaled <- dta_classifier_test_new
+dta_classifier_test_new_scaled[, feature_columns] <- predict(scaling_model,
+                                                             newdata = dta_classifier_test_new[, feature_columns])
+
+
+
+
+dta_classifier_train_new_scaled$isfakeorreal <- factor(
+  dta_classifier_train_new_scaled$isfakeorreal,
+  levels = c("fake", "real")
+)
+dta_classifier_train_new_balanced_scaled$isfakeorreal <- factor(
+  dta_classifier_train_new_balanced_scaled$isfakeorreal,
+  levels = c("fake", "real")
+)
+dta_classifier_test_new_scaled$isfakeorreal <- factor(
+  dta_classifier_test_new_scaled$isfakeorreal,
+  levels = c("fake", "real")
+)
+```
+
+## Random Forest
+
+```{r}
+classifier_control <- caret::trainControl(
+  method = "none",
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+# Valence
+# library(MLmetrics)
+# # Cross validation setup
+# classifier_control <- caret::trainControl(
+#   method = "none",
+#   classProbs = TRUE,
+#   summaryFunction = caret::multiClassSummary
+# )
+
+set.seed(12345)
+
+rf_fit_model1 <- caret::train(
+  isfakeorreal ~ ., # nmf
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "rf",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(mtry = 4)
+)
+
+# Valence
+# rf_fit_model1 <- caret::train(
+#   valence ~ ., # nmf
+#   data = dta_classifier_train_new[, -(1:3)],
+#   method = "rf",
+#   metric = "ROC",
+#   trControl = classifier_control,
+#   tuneGrid = expand.grid(mtry = 4)
+# )
+
+
+
+print(rf_fit_model1)
+plot(caret::varImp(rf_fit_model1)) # To see feature importance
+```
+
+Evaluate on unseen data:
+
+```{r}
+rf_model_1_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model1, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+# Valence
+# rf_model_1_performance <- caret::confusionMatrix(
+#   data = predict(rf_fit_model1, newdata = dta_classifier_test_new),
+#   reference = dta_classifier_test_new$valence
+# )
+
+print(rf_model_1_performance)
+
+
+# SAVE RDS
+saveRDS(rf_fit_model1, "models/rf_fit_model1_AUs.RDS")
+```
+
+-   Accuracy = 68.09%
+
+-   95% CI = (0.5767, 0.7733)
+
+-   NIR = 0.5
+
+-   P = 0.000294 (P \< 0.001)
+
+-   Kappa = 0.3617
+
+-   Sensitivity = 80.85%
+
+-   Specificity = 55.32%
+
+-   Precision = 64.41%
+
+-   F1 = 71.70%
+
+```         
+         Reference
+Prediction real fake
+      real   26    9
+      fake   21   38
+```
+
+## C5.0B
+
+```{r}
+set.seed(12345)
+
+c50_fit_model1 <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "C5.0",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(
+    model = "tree",
+    trials = 20,  # number of boosting iterations
+    winnow = FALSE
+  )
+)
+
+# Valence
+# c50_fit_model1 <- caret::train(
+#   valence ~ .,
+#   data = dta_classifier_train_new[, -(1:3)],
+#   method = "C5.0",
+#   metric = "ROC",
+#   trControl = classifier_control,
+#   tuneGrid = expand.grid(
+#     model = "tree",
+#     trials = 20,  # number of boosting iterations
+#     winnow = FALSE
+#   )
+# )
+
+print(c50_fit_model1)
+plot(caret::varImp(c50_fit_model1)) # To see feature importanc
+```
+
+Evaluate on unseen data:
+
+```{r}
+c50_model_1_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model1, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+# Valence
+# c50_model_1_performance <- caret::confusionMatrix(
+#   data = predict(c50_fit_model1, newdata = dta_classifier_test_new),
+#   reference = dta_classifier_test_new$valence
+# )
+
+print(c50_model_1_performance)
+```
+
+```         
+   Reference
+Prediction real fake
+      real   24   10
+      fake   23   37
+                                          
+               Accuracy : 0.6489          
+                 95% CI : (0.5436, 0.7446)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002539        
+                                          
+                  Kappa : 0.2979          
+                                          
+ Mcnemar's Test P-Value : 0.036714        
+                                          
+            Sensitivity : 0.7872          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.6167          
+         Neg Pred Value : 0.7059          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3936          
+   Detection Prevalence : 0.6383          
+      Balanced Accuracy : 0.6489  
+      F1: 69.16%
+```
+
+# Repeated Cross-Validation
+
+The next step is to train the classifiers again but this time using repeated CV. We did not do this before due to the NMF data leakage problem. However, we will do this now to compare results.
+
+## Random Forest
+
+```{r}
+# Cross validation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+rf_fit_model1_cv <- caret::train(
+  isfakeorreal ~ ., # nmf
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "rf",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneLength = 5
+)
+
+print(rf_fit_model1_cv)
+plot(caret::varImp(rf_fit_model1_cv)) # To see feature importance
+```
+
+Evaluate on unseen data:
+
+```{r}
+rf_model_1_cv_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_1_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+5 folds, 3 repeats:
+
+```         
+          Reference
+Prediction real fake
+      real   29   12
+      fake   18   35
+                                          
+               Accuracy : 0.6809          
+                 95% CI : (0.5767, 0.7733)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.000294        
+                                          
+                  Kappa : 0.3617          
+                                          
+ Mcnemar's Test P-Value : 0.361310        
+                                          
+            Sensitivity : 0.7447          
+            Specificity : 0.6170          
+         Pos Pred Value : 0.6604          
+         Neg Pred Value : 0.7073          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3723          
+   Detection Prevalence : 0.5638          
+      Balanced Accuracy : 0.6809 
+```
+
+10 folds, 3 repeats:
+
+```         
+         Reference
+Prediction real fake
+      real   26   12
+      fake   21   35
+                                          
+               Accuracy : 0.6489          
+                 95% CI : (0.5436, 0.7446)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002539        
+                                          
+                  Kappa : 0.2979          
+                                          
+ Mcnemar's Test P-Value : 0.163734        
+                                          
+            Sensitivity : 0.7447          
+            Specificity : 0.5532          
+         Pos Pred Value : 0.6250          
+         Neg Pred Value : 0.6842          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3723          
+   Detection Prevalence : 0.5957          
+      Balanced Accuracy : 0.6489 
+```
+
+5 folds, 3 repeats (scaled features) FINAL:
+
+```         
+          Reference
+Prediction fake real
+      fake   34   19
+      real   13   28
+                                          
+               Accuracy : 0.6596          
+                 95% CI : (0.5546, 0.7542)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.001294        
+                                          
+                  Kappa : 0.3191          
+                                          
+ Mcnemar's Test P-Value : 0.376759        
+                                          
+            Sensitivity : 0.7234          
+            Specificity : 0.5957          
+         Pos Pred Value : 0.6415          
+         Neg Pred Value : 0.6829          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3617          
+   Detection Prevalence : 0.5638          
+      Balanced Accuracy : 0.6596          
+                                          
+       'Positive' Class : fake   
+```
+
+## C5.0B
+
+```{r}
+# Cross validation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+c50_fit_model1_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "C5.0",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(
+    model = "tree",
+    trials = c(1, 10, 20),  # number of boosting iterations
+    winnow = FALSE
+  )
+)
+
+print(c50_fit_model1_cv)
+plot(caret::varImp(c50_fit_model1_cv)) # To see feature importanc
+```
+
+Evaluate on unseen data:
+
+```{r}
+c50_model_1_cv_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(c50_model_1_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+5 folds, 3 repeats scaled FINAL:
+
+```         
+          Reference
+Prediction real fake
+      real   24   10
+      fake   23   37
+                                          
+               Accuracy : 0.6489          
+                 95% CI : (0.5436, 0.7446)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002539        
+                                          
+                  Kappa : 0.2979          
+                                          
+ Mcnemar's Test P-Value : 0.036714        
+                                          
+            Sensitivity : 0.7872          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.6167          
+         Neg Pred Value : 0.7059          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3936          
+   Detection Prevalence : 0.6383          
+      Balanced Accuracy : 0.6489   
+```
+
+10 folds, 3 repeats:
+
+```         
+          Reference
+Prediction real fake
+      real   24   10
+      fake   23   37
+                                          
+               Accuracy : 0.6489          
+                 95% CI : (0.5436, 0.7446)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002539        
+                                          
+                  Kappa : 0.2979          
+                                          
+ Mcnemar's Test P-Value : 0.036714        
+                                          
+            Sensitivity : 0.7872          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.6167          
+         Neg Pred Value : 0.7059          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3936          
+   Detection Prevalence : 0.6383          
+      Balanced Accuracy : 0.6489   
+```
+
+# 40 Held-Out Videos Evaluation
+
+I will test all models on the 40 held-out videos from the human participant experiment as another test set.
+
+But first, I will have to derive the CMFTS features for these videos.
+
+## Load and Preprocess AU Data
+
+```{r}
+dta_video_au_40 <- read.csv("../human_data_preprocess/video_aus.csv")
+
+# Make sure max frames is 241
+dta_video_au_40 <- dta_video_au_40 %>%
+  filter(frame < 242)
+
+# Keep relevant columns
+dta_video_au_40 <- dta_video_au_40 %>%
+  select(
+    video_source,
+    frame,
+    emotion_yes_no_new,
+    isfakeorreal,
+    contains("_r_")
+  )
+
+# Smooth AU values
+dta_video_au_40_smth <- dta_video_au_40 %>%
+  group_by(video_source) %>%
+  mutate(across(contains("_r_"), ~ zoo::rollmean(., k = 4, fill = "extend", align = "left"), .names = "smth_{col}")) %>%
+  ungroup()
+
+# Visualise difference
+dta_video_au_40_smth %>%
+  filter(video_source == "27__kitchen_pan") %>%
+  select(frame, au07_r_lid_tightener, smth_au07_r_lid_tightener) %>%
+  pivot_longer(cols = c(au07_r_lid_tightener, smth_au07_r_lid_tightener), names_to = "Type", values_to = "Intensity") %>%
+  ggplot(aes(x = frame, y = Intensity, color = Type)) +
+  geom_line() +
+  labs(
+    title = "AU07 - Before vs. After Smoothing",
+    x = "Frame",
+    y = "AU Intensity"
+  ) +
+  theme_minimal()
+```
+
+Clean up column names:
+
+```{r}
+dta_video_au_40_input <- dta_video_au_40_smth %>%
+  select(
+    video_source,
+    frame,
+    emotion_yes_no_new,
+    isfakeorreal,
+    starts_with("smth_")
+  ) %>%
+  rename(
+    smth_AU01_r = smth_au01_r_inner_brow_raiser,
+    smth_AU02_r = smth_au02_r_outer_brow_raiser,
+    smth_AU04_r = smth_au04_r_brow_lowerer,
+    smth_AU05_r = smth_au05_r_upper_lid_raiser,
+    smth_AU06_r = smth_au06_r_cheek_raiser,
+    smth_AU07_r = smth_au07_r_lid_tightener,
+    smth_AU09_r = smth_au09_r_nose_wrinkler,
+    smth_AU10_r = smth_au10_r_upper_lip_raiser,
+    smth_AU12_r = smth_au12_r_lip_corner_puller,
+    smth_AU14_r = smth_au14_r_dimpler,
+    smth_AU15_r = smth_au15_r_lip_corner_depressor,
+    smth_AU17_r = smth_au17_r_chin_raiser,
+    smth_AU20_r = smth_au20_r_lip_stretcher,
+    smth_AU23_r = smth_au23_r_lip_tightener,
+    smth_AU25_r = smth_au25_r_lips_part,
+    smth_AU26_r = smth_au26_r_jaw_drop,
+    smth_AU45_r = smth_au45_r_blink
+  )
+
+# I have renamed them to match the same format as the original normalisation code. 
+```
+
+## Normalisation
+
+Here I will normalise the data in the same way as before - by using the scaling parameters learnt from the training data.
+
+```{r}
+for (col in au_cols) {
+  params <- norm_params[[col]]
+  
+  dta_video_au_40_input[[col]] <- fn_z_score_shift(
+    dta_video_au_40_input[[col]],
+    params["mean"],
+    params["sd"]
+  )
+}
+```
+
+## Select Representative AUs
+
+Now that the data has been normalised properly, I will select the representative AU columns and remove the other AU columns.
+
+```{r}
+dta_40_test_output <- dta_video_au_40_input %>%
+  select(
+    video_source,
+    isfakeorreal,
+    emotion_yes_no_new,
+    frame,
+    smth_AU01_r,
+    smth_AU12_r,
+    smth_AU17_r
+  ) %>%
+  rename(
+    video_filename = video_source,
+    emotion = emotion_yes_no_new,
+    AU01_inner_brow_raiser = smth_AU01_r,
+    AU12_lip_corner_puller = smth_AU12_r,
+    AU17_chin_raiser = smth_AU17_r
+  )
+
+```
+
+## Derive CMFTS Features
+
+```{r}
+dta_40_cmfts_input <- dta_40_test_output %>%
+  select(video_filename, isfakeorreal, emotion, frame, AU01_inner_brow_raiser, AU12_lip_corner_puller, AU17_chin_raiser) %>%
+  pivot_longer(cols = c("AU01_inner_brow_raiser", "AU12_lip_corner_puller", "AU17_chin_raiser"),
+               names_to = "AU",
+               values_to = "activation") %>%
+  pivot_wider(names_from = frame,
+              values_from = activation,
+              names_prefix = "fr_")
+
+frame_cols <- grep("^fr_", names(dta_40_cmfts_input), value = TRUE)
+
+head(dta_40_cmfts_input)
+```
+
+```{r}
+# Apply feature extraction row-wise over the frame columns
+dta_40_cmfts_output <- apply(
+  dta_40_cmfts_input[, frame_cols], 
+  1, 
+  fn_extract_cmfts_features
+  ) %>%
+  do.call(rbind, .) %>%
+  as.data.frame() %>%
+  cbind(
+    dta_40_cmfts_input[, c("video_filename", "isfakeorreal", "emotion", "AU")],
+    .
+  )
+
+head(dta_40_cmfts_output)
+```
+
+## CMFTS Preprocessing
+
+```{r}
+dta_40_cmfts_output_concat <- dta_40_cmfts_output %>%
+  pivot_wider(
+    names_from = AU,
+    values_from = -c(video_filename, AU),
+    names_glue = "{.value}_{AU}"
+  )
+
+# Remove duplicate columns
+dta_40_cmfts_output_concat <- dta_40_cmfts_output_concat[, -3:-6]
+# Rename isfakeorreal & emotion columns
+colnames(dta_40_cmfts_output_concat)[2] <- c("isfakeorreal")
+colnames(dta_40_cmfts_output_concat)[3] <- c("emotion")
+
+head(dta_40_cmfts_output_concat)
+```
+
+Missing values:
+
+```{r}
+dta_40_cmfts_output_concat %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "column",
+               values_to = "n_missing") %>%
+  filter(n_missing > 0)
+```
+
+```{r}
+# Drop permutation entropy columns
+dta_40_cmfts_output_concat <- dta_40_cmfts_output_concat[, -13:-15]
+```
+
+Infinite values:
+
+```{r}
+dta_40_cmfts_output_concat %>%
+  summarise(across(
+    .cols = where(is.numeric),
+    .fns  = ~ sum(is.infinite(.))
+  )) %>%
+  pivot_longer(
+    cols       = everything(),
+    names_to   = "column",
+    values_to  = "n_infinite"
+  )
+```
+
+Drop Shannon entropy CS columns as most values are infinite.
+
+```{r}
+dta_40_cmfts_output_concat <- dta_40_cmfts_output_concat[, -13:-15]
+```
+
+```{r}
+# Convert Infs to NA
+for(col in names(dta_40_cmfts_output_concat)) {
+  dta_40_cmfts_output_concat[[col]][is.infinite(dta_40_cmfts_output_concat[[col]]) ] <- NA
+}
+
+set.seed(12345)
+
+# Copy dta_cmfts_output_concat
+dta_cmfts_40_test_output_imputed <- dta_40_cmfts_output_concat
+
+# Get all numeric columns into a matrix
+tmp <- as.matrix(dta_cmfts_40_test_output_imputed[, sapply(dta_cmfts_40_test_output_imputed, is.numeric)])
+tmp[!is.finite(tmp)] <- NA
+
+# Run missForest
+impute_res <- missForest::missForest(tmp,
+                         ntree = 100,
+                         maxiter = 10,
+                         verbose = TRUE)
+
+dta_cmfts_40_test_output_imputed[, colnames(tmp)] <- impute_res$ximp
+
+impute_res$OOBerror
+```
+
+NRMSE = 0.011
+
+Features with zero SD:
+
+```{r}
+sds_zerosd <- sapply(dta_cmfts_40_test_output_imputed, function(x) {
+  if(is.numeric(x)) sd(x, na.rm=T) else NA
+})
+
+# List features that do not meet the threshold
+names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd == 0)]
+
+# Drop features with zero SD
+dta_cmfts_40_test_output_imputed_zerosd <- dta_cmfts_40_test_output_imputed[, names(sds_zerosd)[is.na(sds_zerosd) | (sds_zerosd > 0)]]
+```
+
+The final dataset for this is ready: `dta_cmfts_40_test_output_imputed_zerosd`.
+
+## Model Predictions
+
+First to normalise the CMFTS features so they are on the same scale as the model was trained on.
+
+```{r}
+# Rename for simplicity
+dta_classifier_40_test <- dta_cmfts_40_test_output_imputed_zerosd
+
+# Test set
+dta_classifier_40_test$isfakeorreal <- factor(
+  dta_classifier_40_test$isfakeorreal,
+  levels = c("fake", "real")
+)
+
+# Normalise
+feature_columns <- names(dta_classifier_train_new)[!names(dta_classifier_train_new) %in% c("video_filename", "emotion", "isfakeorreal")]
+
+dta_classifier_40_test_scaled <- dta_classifier_40_test
+# Apply the scaling model that was learned from the training data
+dta_classifier_40_test_scaled[, feature_columns] <- predict(scaling_model,
+                                                             newdata = dta_classifier_40_test[, feature_columns])
+
+
+head(dta_classifier_40_test_scaled)
+```
+
+### Random Forest
+
+```{r}
+rf_model_1_40 <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_cv, newdata = dta_classifier_40_test_scaled),
+  reference = dta_classifier_40_test_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_1_40)
+
+# ROC AUC
+y_test  <- factor(dta_classifier_40_test_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_cv, newdata = dta_classifier_40_test_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+ROC-AUC = 0.5475 [0.3624-0.7326]
+
+Accuracy = 55% [39.8-69.3]
+
+### C5.0B
+
+```{r}
+c50_model_1_40 <- caret::confusionMatrix(
+  data = predict(c50_fit_model1_cv, newdata = dta_classifier_40_test_scaled),
+  reference = dta_classifier_40_test_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_1_40)
+
+# ROC AUC
+y_test  <- factor(dta_classifier_40_test_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(c50_fit_model1_cv, newdata = dta_classifier_40_test_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+# Emotion Vs No Emotion
+
+## 20% Test Set:
+
+### Random Forest
+
+Emotion:
+
+```{r}
+dta_classifier_test_new_emotion <- dta_classifier_test_new_scaled %>%
+  filter(emotion == "yes")
+
+rf_model_1_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_emotion),
+  reference = dta_classifier_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(rf_model_1_emotion)
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_emotion$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_emotion, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+Without CV:
+
+```         
+          Reference
+Prediction real fake
+      real   21    7
+      fake    8   22
+                                          
+               Accuracy : 0.7414          
+                 95% CI : (0.6096, 0.8474)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.0001535       
+                                          
+                  Kappa : 0.4828          
+                                          
+ Mcnemar's Test P-Value : 1.0000000       
+                                          
+            Sensitivity : 0.7586          
+            Specificity : 0.7241          
+         Pos Pred Value : 0.7333          
+         Neg Pred Value : 0.7500          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3793          
+   Detection Prevalence : 0.5172          
+      Balanced Accuracy : 0.7414 
+```
+
+With CV:
+
+```         
+          Reference
+Prediction real fake
+      real   22   10
+      fake    7   19
+                                          
+               Accuracy : 0.7069          
+                 95% CI : (0.5727, 0.8191)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.001116        
+                                          
+                  Kappa : 0.4138          
+                                          
+ Mcnemar's Test P-Value : 0.627626        
+                                          
+            Sensitivity : 0.6552          
+            Specificity : 0.7586          
+         Pos Pred Value : 0.7308          
+         Neg Pred Value : 0.6875          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3276          
+   Detection Prevalence : 0.4483          
+      Balanced Accuracy : 0.7069 
+```
+
+With CV FINAL:
+
+```         
+          Reference
+Prediction fake real
+      fake   19    6
+      real   10   23
+                                         
+               Accuracy : 0.7241         
+                 95% CI : (0.591, 0.8334)
+    No Information Rate : 0.5            
+    P-Value [Acc > NIR] : 0.0004309      
+                                         
+                  Kappa : 0.4483         
+                                         
+ Mcnemar's Test P-Value : 0.4532547      
+                                         
+            Sensitivity : 0.6552         
+            Specificity : 0.7931         
+         Pos Pred Value : 0.7600         
+         Neg Pred Value : 0.6970         
+             Prevalence : 0.5000         
+         Detection Rate : 0.3276         
+   Detection Prevalence : 0.4310         
+      Balanced Accuracy : 0.7241         
+                                         
+       'Positive' Class : fake           
+                                         
+Setting direction: controls < cases
+Area under the curve: 0.7652
+95% CI: 0.6415-0.8888 (DeLong)
+```
+
+Bar chart:
+
+```{r fig.width=6, fig.height=6}
+ggplot(
+  data = data.frame(
+    Condition = factor(c("Emotion Videos", "No Emotion Videos"),
+                       levels = c("Emotion Videos", "No Emotion Videos")),
+    Accuracy  = c(72.4, 55.6),
+    CI_low    = c(59.8, 39.6),
+    CI_high   = c(82.2, 70.5),
+    p_label   = c("p < .001", "p = .309")
+  ),
+  aes(x = Condition, y = Accuracy)
+) +
+  geom_col(width = 0.6, fill = "gray50") +
+  geom_errorbar(aes(ymin = CI_low, ymax = CI_high),
+                width = 0.2, size = 0.8) +
+  geom_hline(yintercept = 50, linetype = "dashed",
+             colour = "red", size = 0.6, alpha = 0.6) +
+  annotate("text", x = 2, y = 50, label = "NIR (0.5)",
+           hjust = -1.11, vjust = -0.6, size = 4, colour = "red") +
+  geom_text(aes(label = p_label), vjust = -4, size = 8) +
+  scale_y_continuous(limits = c(0, 100),
+                     expand = expansion(mult = c(0, 0.08))) +
+  labs(y = "Accuracy (%)", x = NULL) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.text.x  = element_text(size = 18),
+    axis.text.y = element_text(size = 18),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    plot.margin  = margin(10, 10, 10, 10)
+  )
+
+```
+
+No emotion:
+
+```{r}
+set.seed(12345)
+dta_classifier_test_new_no_emotion <- dta_classifier_test_new_scaled %>%
+  filter(emotion == "no")
+
+rf_model_1_no_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_no_emotion),
+  reference = dta_classifier_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(rf_model_1_no_emotion)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_no_emotion$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_no_emotion, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+Without CV:
+
+```         
+          Reference
+Prediction real fake
+      real    6    2
+      fake   12   16
+                                          
+               Accuracy : 0.6111          
+                 95% CI : (0.4346, 0.7686)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.12149         
+                                          
+                  Kappa : 0.2222          
+                                          
+ Mcnemar's Test P-Value : 0.01616         
+                                          
+            Sensitivity : 0.8889          
+            Specificity : 0.3333          
+         Pos Pred Value : 0.5714          
+         Neg Pred Value : 0.7500          
+             Prevalence : 0.5000          
+         Detection Rate : 0.4444          
+   Detection Prevalence : 0.7778          
+      Balanced Accuracy : 0.6111          
+                                          
+       'Positive' Class : fake  
+```
+
+With CV:
+
+```         
+          Reference
+Prediction real fake
+      real    7    2
+      fake   11   16
+                                          
+               Accuracy : 0.6389          
+                 95% CI : (0.4622, 0.7918)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.06625         
+                                          
+                  Kappa : 0.2778          
+                                          
+ Mcnemar's Test P-Value : 0.02650         
+                                          
+            Sensitivity : 0.8889          
+            Specificity : 0.3889          
+         Pos Pred Value : 0.5926          
+         Neg Pred Value : 0.7778          
+             Prevalence : 0.5000          
+         Detection Rate : 0.4444          
+   Detection Prevalence : 0.7500          
+      Balanced Accuracy : 0.6389  
+```
+
+With CV FINAL:
+
+```         
+          Reference
+Prediction fake real
+      fake   15   13
+      real    3    5
+                                         
+               Accuracy : 0.5556         
+                 95% CI : (0.381, 0.7206)
+    No Information Rate : 0.5            
+    P-Value [Acc > NIR] : 0.30886        
+                                         
+                  Kappa : 0.1111         
+                                         
+ Mcnemar's Test P-Value : 0.02445        
+                                         
+            Sensitivity : 0.8333         
+            Specificity : 0.2778         
+         Pos Pred Value : 0.5357         
+         Neg Pred Value : 0.6250         
+             Prevalence : 0.5000         
+         Detection Rate : 0.4167         
+   Detection Prevalence : 0.7778         
+      Balanced Accuracy : 0.5556         
+                                         
+       'Positive' Class : fake           
+                                         
+Setting direction: controls < cases
+Area under the curve: 0.6049
+95% CI: 0.4071-0.8028 (DeLong)
+```
+
+Is the reported accuracy for emotion vs no emotion significantly different?
+
+```{r}
+# First, test accuracy
+
+# Two-sample test of proportions + Fisher's exact
+test <- dta_classifier_test_new_scaled %>% 
+  mutate(
+    pred_class = predict(rf_fit_model1_cv, newdata = ., type = "raw"),
+    pred_fake = predict(rf_fit_model1_cv, newdata = ., type = "prob")[,"fake"],
+    correct = as.integer(pred_class == isfakeorreal)
+)
+
+emotion_test <- filter(test, emotion == "yes")
+no_emotion_test <- filter(test, emotion == "no")
+
+# Accuracy comparison
+x <- c(sum(emotion_test$correct), sum(no_emotion_test$correct))  # number correct in each group
+n <- c(nrow(emotion_test), nrow(no_emotion_test))  # group sizes
+
+prop.test(x, n, correct = TRUE)  # chi-square with yates
+fisher.test(matrix(c(x[1], n[1]-x[1], x[2], n[2]-x[2]), nrow = 2, byrow = T))  # exact
+
+```
+
+The observed gap between emotion accuracy (72.4%) and no emotion accuracy (55.6%) of 16.9 percentage points is not statistically significant at α = 0.05.
+
+Yates p = 0.146, Fisher p = 0.119.
+
+Bootstrap CI for accuracy difference:
+
+```{r}
+set.seed(12345)
+B <- 1000
+boot_diff <- replicate(B, {
+  em_i <- emotion_test[sample.int(nrow(emotion_test), replace = T), ]
+  no_em_i <- no_emotion_test[sample.int(nrow(no_emotion_test), replace = T), ]
+  mean(em_i$correct) - mean(no_em_i$correct)
+})
+quantile(boot_diff, c(.025, .5, .975))
+```
+
+The CI crosses zero, so cannot rule out no true difference with this sample.
+
+Is reported ROC-AUC significantly different for emotion vs. no emotion?
+
+```{r}
+roc_emotion <- pROC::roc(emotion_test$isfakeorreal, emotion_test$pred_fake,
+                         levels = c("real", "fake"), direction = "<")
+roc_no_emotion <- pROC::roc(no_emotion_test$isfakeorreal, no_emotion_test$pred_fake,
+                            levels = c("real", "fake"), direction = "<")
+
+# AUC & 95% CI for both
+pROC::auc(roc_emotion); pROC::ci.auc(roc_emotion)
+pROC::auc(roc_no_emotion); pROC::ci.auc(roc_no_emotion)
+
+# Test AUCs between groups
+pROC::roc.test(roc_emotion, roc_no_emotion, method = "delong", paired = F)
+```
+
+Emotion AUC = 0.765 (95% CI = 0.642-0.889)
+
+No emotion AUC = 0.605 (95% CI = 0.407-0.803)
+
+DeLong test for the gap: p = .183
+
+A suggestive but non-significant improvement in Emotion videos, with wide CIs due to low sample size.
+
+Sensitivity & specificity comparisons to see how performance differs:
+
+```{r}
+# Sensitivity (fake vids only)
+emotion_fake <- filter(test, emotion == "yes", isfakeorreal == "fake")
+no_emotion_fake <- filter(test, emotion == "no", isfakeorreal == "fake")
+prop.test(c(sum(emotion_fake$pred_class == "fake"), sum(no_emotion_fake$pred_class == "fake")),
+          c(nrow(emotion_fake), nrow(no_emotion_fake)))
+
+# Specificity (real vids only)
+emotion_real <- filter(test, emotion == "yes", isfakeorreal == "real")
+no_emotion_real <- filter(test, emotion == "no", isfakeorreal == "real")
+prop.test(c(sum(emotion_real$pred_class == "real"), sum(no_emotion_real$pred_class == "real")),
+          c(nrow(emotion_real), nrow(no_emotion_real)))
+```
+
+Sensitivity (fake videos):
+
+-   Emotion 0.655 vs no emotion 0.833: p = .321
+
+-   No clear evidence of a difference.
+
+Specificity (real videos):
+
+-   Emotion 0.793 vs no emotion 0.278: p = .0014 (p \< .01)
+
+-   Clear, significant drop in specificity on No Emotion. The model produces many more false positives (calls real videos fake) in no emotion videos.
+
+-   Accuracy is lower in No Emotion mainly because specificity collapses, even though sensitivity is a bit higher.
+
+On the held-out 20% test set, RF performance appears better on Emotion videos (Accuracy = 72.4% vs 55.6%; AUC = 0.77 vs 0.61), but neither difference is statistically significant (Accuracy Fisher p = .119; AUC DeLong p = .183).
+
+However, specificity is significantly lower on No Emotion videos (0.278 vs 0.793; p = .001), indicating substantially more false positives on real videos without overt emotion.
+
+Confusion Matrices:
+
+```{r}
+# Filter subsets
+emotion_test <- dta_classifier_test_new_scaled %>% filter(emotion == "yes")
+no_emotion_test <- dta_classifier_test_new_scaled %>% filter(emotion == "no")
+
+# Model predictions
+pred_emotion    <- predict(rf_fit_model1_cv, newdata = emotion_test)
+pred_no_emotion <- predict(rf_fit_model1_cv, newdata = no_emotion_test)
+
+# Raw confusion matrices
+cm_emotion <- table(Predicted = pred_emotion, Actual = emotion_test$isfakeorreal)
+cm_no_emotion <- table(Predicted = pred_no_emotion, Actual = no_emotion_test$isfakeorreal)
+
+# Convert to tidy format
+tidy_cm <- function(cm, title) {
+  as.data.frame(cm) %>%
+    mutate(Condition = title)
+}
+
+df_cm <- bind_rows(
+  tidy_cm(cm_emotion,    "Emotion Videos"),
+  tidy_cm(cm_no_emotion, "No Emotion Videos")
+)
+
+# Plot
+p_cm <- df_cm %>%
+  ggplot(aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 6, fontface = "bold") +
+  scale_fill_gradient(high = "#1b9e77", low = "#d95f02") +
+  facet_wrap(~Condition, nrow = 1) +
+  labs(title = "Confusion Matrices by Emotional Content",
+       fill = "Count") +
+  theme_classic(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.position = "right"
+  )
+
+p_cm
+
+```
+
+Post hoc power analysis on accuracy comparison (two proportions test):
+
+```{r}
+library(pwr)
+
+#observerd proportions (taken from above)
+p1 <- 42/58  # emotion, correct/total
+p2 <- 20/36  # no emotion
+
+# effect size h
+h <- ES.h(p1, p2)
+
+power_result <- pwr.2p2n.test(
+  h = h,
+  n1 = 58,
+  n2 = 36,
+  sig.level = 0.05,
+  alternative = "two.sided"
+)
+
+print(power_result)
+print(paste("Cohen's h =", round(h, 3)))
+print(paste("Achieved power =", round(power_result$power, 3)))
+```
+
+```         
+   difference of proportion power calculation for binomial distribution (arcsine transformation) 
+
+              h = 0.3534946
+             n1 = 58
+             n2 = 36
+      sig.level = 0.05
+          power = 0.38455
+    alternative = two.sided
+
+NOTE: different sample sizes
+
+[1] "Cohen's h = 0.353"
+[1] "Achieved power = 0.385"
+```
+
+### C5.0B
+
+Emotion:
+
+```{r}
+c50_model_1_emotion <- caret::confusionMatrix(
+  data = predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_emotion),
+  reference = dta_classifier_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(c50_model_1_emotion)
+```
+
+Without CV:
+
+```         
+          Reference
+Prediction real fake
+      real   18    7
+      fake   11   22
+                                          
+               Accuracy : 0.6897          
+                 95% CI : (0.5546, 0.8046)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002677        
+                                          
+                  Kappa : 0.3793          
+                                          
+ Mcnemar's Test P-Value : 0.479500        
+                                          
+            Sensitivity : 0.7586          
+            Specificity : 0.6207          
+         Pos Pred Value : 0.6667          
+         Neg Pred Value : 0.7200          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3793          
+   Detection Prevalence : 0.5690          
+      Balanced Accuracy : 0.6897 
+```
+
+With CV:
+
+```         
+         Reference
+Prediction real fake
+      real   18    7
+      fake   11   22
+                                          
+               Accuracy : 0.6897          
+                 95% CI : (0.5546, 0.8046)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002677        
+                                          
+                  Kappa : 0.3793          
+                                          
+ Mcnemar's Test P-Value : 0.479500        
+                                          
+            Sensitivity : 0.7586          
+            Specificity : 0.6207          
+         Pos Pred Value : 0.6667          
+         Neg Pred Value : 0.7200          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3793          
+   Detection Prevalence : 0.5690          
+      Balanced Accuracy : 0.6897   
+```
+
+No Emotion:
+
+```{r}
+c50_model_1_no_emotion <- caret::confusionMatrix(
+  data = predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_no_emotion),
+  reference = dta_classifier_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(c50_model_1_no_emotion)
+```
+
+Without CV:
+
+```         
+          Reference
+Prediction real fake
+      real    6    3
+      fake   12   15
+                                          
+               Accuracy : 0.5833          
+                 95% CI : (0.4076, 0.7449)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.20252         
+                                          
+                  Kappa : 0.1667          
+                                          
+ Mcnemar's Test P-Value : 0.03887         
+                                          
+            Sensitivity : 0.8333          
+            Specificity : 0.3333          
+         Pos Pred Value : 0.5556          
+         Neg Pred Value : 0.6667          
+             Prevalence : 0.5000          
+         Detection Rate : 0.4167          
+   Detection Prevalence : 0.7500          
+      Balanced Accuracy : 0.5833  
+```
+
+With CV:
+
+Same.
+
+### SVM
+
+Emotion:
+
+```{r}
+svm_model_1_emotion <- caret::confusionMatrix(
+  data = predict(svm_model1_cv, newdata = dta_classifier_test_new_emotion),
+  reference = dta_classifier_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(svm_model_1_emotion)
+```
+
+Without CV:
+
+```         
+          Reference
+Prediction real fake
+      real   22   12
+      fake    7   17
+                                          
+               Accuracy : 0.6724          
+                 95% CI : (0.5366, 0.7899)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.005964        
+                                          
+                  Kappa : 0.3448          
+                                          
+ Mcnemar's Test P-Value : 0.358795        
+                                          
+            Sensitivity : 0.5862          
+            Specificity : 0.7586          
+         Pos Pred Value : 0.7083          
+         Neg Pred Value : 0.6471          
+             Prevalence : 0.5000          
+         Detection Rate : 0.2931          
+   Detection Prevalence : 0.4138          
+      Balanced Accuracy : 0.6724  
+```
+
+With CV:
+
+```         
+          Reference
+Prediction real fake
+      real   23   12
+      fake    6   17
+                                          
+               Accuracy : 0.6897          
+                 95% CI : (0.5546, 0.8046)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.002677        
+                                          
+                  Kappa : 0.3793          
+                                          
+ Mcnemar's Test P-Value : 0.238593        
+                                          
+            Sensitivity : 0.5862          
+            Specificity : 0.7931          
+         Pos Pred Value : 0.7391          
+         Neg Pred Value : 0.6571          
+             Prevalence : 0.5000          
+         Detection Rate : 0.2931          
+   Detection Prevalence : 0.3966          
+      Balanced Accuracy : 0.6897   
+```
+
+No Emotion:
+
+```{r}
+svm_model_1_no_emotion <- caret::confusionMatrix(
+  data = predict(svm_model1_cv, newdata = dta_classifier_test_new_no_emotion),
+  reference = dta_classifier_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(svm_model_1_no_emotion)
+```
+
+Without CV:
+
+```         
+          Reference
+Prediction real fake
+      real    6    6
+      fake   12   12
+                                          
+               Accuracy : 0.5             
+                 95% CI : (0.3292, 0.6708)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.5660          
+                                          
+                  Kappa : 0               
+                                          
+ Mcnemar's Test P-Value : 0.2386          
+                                          
+            Sensitivity : 0.6667          
+            Specificity : 0.3333          
+         Pos Pred Value : 0.5000          
+         Neg Pred Value : 0.5000          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3333          
+   Detection Prevalence : 0.6667          
+      Balanced Accuracy : 0.5000 
+```
+
+With CV:
+
+```         
+          Reference
+Prediction real fake
+      real    7    6
+      fake   11   12
+                                          
+               Accuracy : 0.5278          
+                 95% CI : (0.3549, 0.6959)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.434           
+                                          
+                  Kappa : 0.0556          
+                                          
+ Mcnemar's Test P-Value : 0.332           
+                                          
+            Sensitivity : 0.6667          
+            Specificity : 0.3889          
+         Pos Pred Value : 0.5217          
+         Neg Pred Value : 0.5385          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3333          
+   Detection Prevalence : 0.6389          
+      Balanced Accuracy : 0.5278  
+```
+
+### Logistic Regression
+
+Emotion:
+
+```{r}
+lr_model_1_emotion <- caret::confusionMatrix(
+  data = predict(lr_model1, newdata = dta_classifier_test_new_emotion),
+  reference = dta_classifier_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(lr_model_1_emotion)
+```
+
+With CV:
+
+```         
+          Reference
+Prediction real fake
+      real   17   12
+      fake   12   17
+                                         
+               Accuracy : 0.5862         
+                 95% CI : (0.4493, 0.714)
+    No Information Rate : 0.5            
+    P-Value [Acc > NIR] : 0.1185         
+                                         
+                  Kappa : 0.1724         
+                                         
+ Mcnemar's Test P-Value : 1.0000         
+                                         
+            Sensitivity : 0.5862         
+            Specificity : 0.5862         
+         Pos Pred Value : 0.5862         
+         Neg Pred Value : 0.5862         
+             Prevalence : 0.5000         
+         Detection Rate : 0.2931         
+   Detection Prevalence : 0.5000         
+      Balanced Accuracy : 0.5862 
+```
+
+No emotion:
+
+```{r}
+lr_model_1_no_emotion <- caret::confusionMatrix(
+  data = predict(lr_model1, newdata = dta_classifier_test_new_no_emotion),
+  reference = dta_classifier_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(lr_model_1_no_emotion)
+```
+
+With CV:
+
+```         
+          Reference
+Prediction real fake
+      real    7    6
+      fake   11   12
+                                          
+               Accuracy : 0.5278          
+                 95% CI : (0.3549, 0.6959)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.434           
+                                          
+                  Kappa : 0.0556          
+                                          
+ Mcnemar's Test P-Value : 0.332           
+                                          
+            Sensitivity : 0.6667          
+            Specificity : 0.3889          
+         Pos Pred Value : 0.5217          
+         Neg Pred Value : 0.5385          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3333          
+   Detection Prevalence : 0.6389          
+      Balanced Accuracy : 0.5278   
+```
+
+## 40 Held-Out Videos:
+
+### RF Model 1
+
+Emotion:
+
+```{r}
+dta_classifier_40_test_scaled_emotion <- dta_classifier_40_test_scaled %>%
+  filter(emotion == "y")
+
+rf_model_1_40_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_cv, newdata = dta_classifier_40_test_scaled_emotion),
+  reference = dta_classifier_40_test_scaled_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(rf_model_1_40_emotion)
+
+# ROC AUC
+y_test  <- factor(dta_classifier_40_test_scaled_emotion$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_cv, newdata = dta_classifier_40_test_scaled_emotion, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+No emotion:
+
+```{r}
+dta_classifier_40_test_scaled_no_emotion <- dta_classifier_40_test_scaled %>%
+  filter(emotion == "n")
+
+rf_model_1_40_no_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_cv, newdata = dta_classifier_40_test_scaled_no_emotion),
+  reference = dta_classifier_40_test_scaled_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(rf_model_1_40_no_emotion)
+
+# ROC AUC
+y_test  <- factor(dta_classifier_40_test_scaled_no_emotion$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_cv, newdata = dta_classifier_40_test_scaled_no_emotion, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+Accuracy = 45.83%
+
+95% CI = (0.2555, 0.6718)
+
+NIR = 0.5
+
+P = 0.7294
+
+Kappa = -0.0833
+
+Sensitivity = 41.67%
+
+Specificity = 50%
+
+### RF Model 2
+
+Emotion:
+
+```{r}
+dta_classifier_40_test_new_all_emotion <- dta_classifier_40_test_new_all %>%
+  filter(emotion == "y")
+
+rf_model_2_40_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model2, newdata = dta_classifier_40_test_new_all_emotion),
+  reference = dta_classifier_40_test_new_all_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(rf_model_2_40_emotion)
+```
+
+Accuracy = 43.75%
+
+95% CI = (0.1975, 0.7012)
+
+NIR = 0.5
+
+P = 0.7728
+
+Kappa = -0.125
+
+Sensitivity = 62.50%
+
+Specificity = 25%
+
+No emotion:
+
+```{r}
+dta_classifier_40_test_new_all_no_emotion <- dta_classifier_40_test_new_all %>%
+  filter(emotion == "n")
+
+rf_model_2_40_no_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model2, newdata = dta_classifier_40_test_new_all_no_emotion),
+  reference = dta_classifier_40_test_new_all_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(rf_model_2_40_no_emotion)
+```
+
+Accuracy = 62.50%
+
+95% CI = (0.4059, 0.812)
+
+NIR = 0.5
+
+P = 0.1537
+
+Kappa = 0.25
+
+Sensitivity = 75%
+
+Specificity = 50%
+
+### C5.0B Model 1
+
+Emotion:
+
+```{r}
+c50_model_1_40_emotion <- caret::confusionMatrix(
+  data = predict(c50_fit_model1, newdata = dta_classifier_40_test_new_emotion),
+  reference = dta_classifier_40_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(c50_model_1_40_emotion)
+```
+
+Accuracy = 50.00%
+
+95% CI = (0.2465, 07535)
+
+NIR = 0.5
+
+P = 0.5982
+
+Kappa = 0
+
+Sensitivity = 1
+
+Specificity = 0
+
+No emotion:
+
+```{r}
+c50_model_1_40_no_emotion <- caret::confusionMatrix(
+  data = predict(c50_fit_model1, newdata = dta_classifier_40_test_new_no_emotion),
+  reference = dta_classifier_40_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- No Emotion: ---")
+print(c50_model_1_40_no_emotion)
+```
+
+Accuracy = 50.00%
+
+95% CI = (0.2912, 0.7088)
+
+NIR = 0.5
+
+P = 0.5806
+
+Kappa = 0
+
+Sensitivity = 83.33%
+
+Specificity = 16.67%
+
+### C5.0B Model 2
+
+Emotion:
+
+```{r}
+c50_model_2_40_emotion <- caret::confusionMatrix(
+  data = predict(c50_fit_model2, newdata = dta_classifier_40_test_new_all_emotion),
+  reference = dta_classifier_40_test_new_all_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print("--- Emotion: ---")
+print(c50_model_2_40_emotion)
+```
+
+# Additional Models
+
+It is a good idea to train a few more classifiers (non-decision tree) to see how they compare to the current decision tree models. This allows us to see whether there is a significant difference between decision tree and non-decision tree classifiers.
+
+## SVM
+
+Support vector machines are a good choice as they are also non-linear but operate in a different way to decision trees (geometrically finds the optimal hyperplane that maximises the margin between different classes).
+
+```{r}
+# No CV setup
+classifier_control <- caret::trainControl(
+  method = "none",
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+svm_model1 <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "svmRadial",  # RBF kernel
+  trControl = classifier_control
+)
+```
+
+Evaluate on 20% test set:
+
+```{r}
+svm_model_1_performance <- caret::confusionMatrix(
+  data = predict(svm_model1, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(svm_model_1_performance)
+```
+
+```         
+          Reference
+Prediction real fake
+      real   29   18
+      fake   18   29
+                                         
+               Accuracy : 0.617          
+                 95% CI : (0.511, 0.7154)
+    No Information Rate : 0.5            
+    P-Value [Acc > NIR] : 0.01488        
+                                         
+                  Kappa : 0.234          
+                                         
+ Mcnemar's Test P-Value : 1.00000        
+                                         
+            Sensitivity : 0.6170         
+            Specificity : 0.6170         
+         Pos Pred Value : 0.6170         
+         Neg Pred Value : 0.6170         
+             Prevalence : 0.5000         
+         Detection Rate : 0.3085         
+   Detection Prevalence : 0.5000         
+      Balanced Accuracy : 0.6170  
+```
+
+## Linear Regression
+
+This will be the linear benchmark to compare our other non-linear model performances to. A comparable performance might suggest that the data is not non-linear and is best captured by linear models.
+
+```{r}
+# Cross validation setup
+classifier_control <- caret::trainControl(
+  method = "none",
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+lr_model1 <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "glm",  # Generalised linear models
+  family = "binomial",
+  trControl = classifier_control
+)
+```
+
+Evaluate on test set:
+
+```{r}
+lr_model1_performance <- caret::confusionMatrix(
+  data = predict(lr_model1, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(lr_model1_performance)
+```
+
+```         
+          Reference
+Prediction real fake
+      real   24   18
+      fake   23   29
+                                          
+               Accuracy : 0.5638          
+                 95% CI : (0.4576, 0.6659)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.1282          
+                                          
+                  Kappa : 0.1277          
+                                          
+ Mcnemar's Test P-Value : 0.5322          
+                                          
+            Sensitivity : 0.6170          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.5577          
+         Neg Pred Value : 0.5714          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3085          
+   Detection Prevalence : 0.5532          
+      Balanced Accuracy : 0.5638  
+```
+
+Evaluate on 40 held out videos:
+
+```{r}
+lr_model1_40_performance <- caret::confusionMatrix(
+  data = predict(lr_model1, newdata = dta_classifier_40_test_new_scaled),
+  reference = dta_classifier_40_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(lr_model1_40_performance)
+```
+
+## SVM (CV)
+
+```{r}
+# Cross-valiation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+svm_model1_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "svmRadial",  # RBF kernel
+  trControl = classifier_control
+)
+
+
+# No native feature importance function.
+```
+
+Evaluate on 20% test set:
+
+```{r}
+svm_model_1_cv_performance <- caret::confusionMatrix(
+  data = predict(svm_model1_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(svm_model_1_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(svm_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+5 folds, 3 repeats:
+
+```         
+          Reference
+Prediction real fake
+      real   31   18
+      fake   16   29
+                                          
+               Accuracy : 0.6383          
+                 95% CI : (0.5327, 0.7349)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.004774        
+                                          
+                  Kappa : 0.2766          
+                                          
+ Mcnemar's Test P-Value : 0.863832        
+                                          
+            Sensitivity : 0.6170          
+            Specificity : 0.6596          
+         Pos Pred Value : 0.6444          
+         Neg Pred Value : 0.6327          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3085          
+   Detection Prevalence : 0.4787          
+      Balanced Accuracy : 0.6383  
+```
+
+10 folds, 3 repeats:
+
+```         
+          Reference
+Prediction real fake
+      real   30   18
+      fake   17   29
+                                          
+               Accuracy : 0.6277          
+                 95% CI : (0.5218, 0.7252)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.008605        
+                                          
+                  Kappa : 0.2553          
+                                          
+ Mcnemar's Test P-Value : 1.000000        
+                                          
+            Sensitivity : 0.6170          
+            Specificity : 0.6383          
+         Pos Pred Value : 0.6304          
+         Neg Pred Value : 0.6250          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3085          
+   Detection Prevalence : 0.4894          
+      Balanced Accuracy : 0.6277 
+```
+
+## Logistic Regression (CV)
+
+```{r}
+# Cross-valiation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+lr_model1_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "glm",  # Generalised linear models
+  family = "binomial",
+  trControl = classifier_control
+)
+
+plot(caret::varImp(lr_model1_cv)) # To see feature importance
+```
+
+Evaluate on 20% test set:
+
+```{r}
+lr_model1_cv_performance <- caret::confusionMatrix(
+  data = predict(lr_model1_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(lr_model1_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(lr_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+5 folds, 3 repeats:
+
+```         
+          Reference
+Prediction real fake
+      real   24   18
+      fake   23   29
+                                          
+               Accuracy : 0.5638          
+                 95% CI : (0.4576, 0.6659)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.1282          
+                                          
+                  Kappa : 0.1277          
+                                          
+ Mcnemar's Test P-Value : 0.5322          
+                                          
+            Sensitivity : 0.6170          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.5577          
+         Neg Pred Value : 0.5714          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3085          
+   Detection Prevalence : 0.5532          
+      Balanced Accuracy : 0.5638          
+                                          
+       'Positive' Class : fake    
+```
+
+10 folds, 3 repeats:
+
+```         
+          Reference
+Prediction real fake
+      real   24   18
+      fake   23   29
+                                          
+               Accuracy : 0.5638          
+                 95% CI : (0.4576, 0.6659)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.1282          
+                                          
+                  Kappa : 0.1277          
+                                          
+ Mcnemar's Test P-Value : 0.5322          
+                                          
+            Sensitivity : 0.6170          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.5577          
+         Neg Pred Value : 0.5714          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3085          
+   Detection Prevalence : 0.5532          
+      Balanced Accuracy : 0.5638 
+```
+
+## LDA (CV)
+
+Linear Discriminant Analysis is another linear model to compare against Logistic Regression. It assumes features are normally distributed and have equal variance.
+
+```{r}
+# Cross-valiation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(12345)
+
+lda_model_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_scaled[, -(1:2)],
+  method = "lda",
+  metric = "ROC",
+  trControl = classifier_control
+)
+```
+
+Evaluate on 20% test set:
+
+```{r}
+lda_model_cv_performance <- caret::confusionMatrix(
+  data = predict(lda_model_cv, newdata = dta_classifier_test_new_scaled, type="raw"),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(lda_model_cv_performance)
+```
+
+```         
+
+
+          Reference
+Prediction fake real
+      fake   29   22
+      real   18   25
+                                          
+               Accuracy : 0.5745          
+                 95% CI : (0.4682, 0.6759)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.08983         
+                                          
+                  Kappa : 0.1489          
+                                          
+ Mcnemar's Test P-Value : 0.63526         
+                                          
+            Sensitivity : 0.6170          
+            Specificity : 0.5319          
+         Pos Pred Value : 0.5686          
+         Neg Pred Value : 0.5814          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3085          
+   Detection Prevalence : 0.5426          
+      Balanced Accuracy : 0.5745          
+                                          
+       'Positive' Class : fake    
+```
+
+# Figures
+
+Human vs model performance bar chart:
+
+```{r fig.width=6, fig.height=6}
+ggplot(
+  data = data.frame(
+    Stimuli = factor(
+      c("Full Stimuli", "Point Light Display", "Point Light Display"),
+      levels = c("Full Stimuli", "Point Light Display")
+    ),
+    Method = factor(
+      c("Human Observers", "Human Observers", "Random Forest"),
+      levels = c("Human Observers", "Random Forest")
+    ),
+    Accuracy = c(88.33, 50.51, 55.00),
+    CI_low  = c(80.0,  40.3,  39.8),
+    CI_high = c(93.5,  60.7,  69.3)
+  ),
+  aes(x = Stimuli, y = Accuracy, fill = Method)
+) +
+  geom_col(position = position_dodge(width = 0.65), width = 0.6) +
+  geom_errorbar(
+    aes(ymin = CI_low, ymax = CI_high),
+    position = position_dodge(width = 0.65),
+    width = 0.2, size = 0.8
+  ) +
+  geom_hline(yintercept = 50, linetype = "dashed",
+             colour = "red", size = 0.6, alpha = 0.6) +
+  annotate("text", x = 2, y = 50, label = "NIR (0.5)",
+           hjust = -1.11, vjust = -0.6, size = 4, colour = "red") +
+  scale_y_continuous(limits = c(0, 100),
+                     expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = c("Human Observers" = "gray40",
+                               "Random Forest"   = "gray70")) +
+  labs(x = NULL, y = "Accuracy (%)", fill = NULL) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 18),
+    axis.title.y = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 18),
+    axis.text.x = element_text(size = 18),
+    plot.margin  = margin(10, 10, 10, 10)
+  )
+```
+
+ROC curve figure:
+
+```{r, fig.width=8, fig.height=6}
+# Probabilities on the same test set
+p_rf  <- predict(rf_fit_model1_cv,  newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+p_c50 <- predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+p_svm <- predict(svm_model1_cv,     newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+y_test <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+
+roc_df <- function(truth, prob, name){
+  r <- pROC::roc(truth, prob, levels = c("real","fake"), direction = "<", quiet = TRUE)
+  c <- pROC::coords(r, x = "all", ret = c("specificity","sensitivity","threshold"), transpose = FALSE)
+  c$model <- name
+  c$FPR <- 1 - c$specificity
+  c$AUC <- as.numeric(pROC::auc(r))
+  c
+}
+
+roc_all <- bind_rows(
+  roc_df(y_test, p_rf,  "Random Forest"),
+  roc_df(y_test, p_c50, "C5.0"),
+  roc_df(y_test, p_svm, "SVM (RBF)")
+)
+
+# Legend labels with AUC
+auc_labels <- roc_all |>
+  group_by(model) |>
+  summarise(AUC = unique(round(AUC, 3)), .groups = "drop") |>
+  mutate(label = paste0(model, " (AUC=", sprintf("%.3f", AUC), ")"))
+label_map <- setNames(auc_labels$label, auc_labels$model)
+
+ggplot(roc_all, aes(x = FPR, y = sensitivity, color = model)) +
+  geom_line(linewidth = 1, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linewidth = 0.6, colour = "grey60") +
+  coord_equal(xlim = c(0,1), ylim = c(0,1), expand = FALSE) +
+  scale_x_continuous(breaks = seq(0, 1, 0.1),
+                     labels = scales::number_format(accuracy = 0.1)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.1),
+                     labels = scales::number_format(accuracy = 0.1)) +
+  scale_color_brewer(type = "qual", palette = "Dark2",
+                     labels = label_map, breaks = names(label_map)) +
+  labs(
+    x = "False Positive Rate",
+    y = "True Positive Rate (Sensitivity)",
+    color = NULL,
+    title = "ROC Curves on 20% Test Set",
+    subtitle = "Random Forest, C5.0, and SVM (positive class = fake)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 11),
+    plot.title = element_text(face = "bold")
+  )
+```
+
+```{r, fig.width=5, fig.height=5}
+library(ROCR)
+
+# Extract predicted probabilities (fake class)
+rf_probs  <- predict(rf_fit_model1_cv,  newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+c50_probs <- predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+svm_probs <- predict(svm_model1_cv,     newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+lr_probs <- predict(lr_model1_cv,     newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+# True outcome (must be numeric 0/1)
+true_class <- ifelse(dta_classifier_test_new_scaled$isfakeorreal == "fake", 1, 0)
+
+# Build ROCR prediction objects
+pred_rf  <- prediction(rf_probs,  true_class)
+pred_c50 <- prediction(c50_probs, true_class)
+pred_svm <- prediction(svm_probs, true_class)
+pred_lr <- prediction(lr_probs, true_class)
+
+# Performance objects for TPR/FPR
+perf_rf  <- performance(pred_rf,  "tpr", "fpr")
+perf_c50 <- performance(pred_c50, "tpr", "fpr")
+perf_svm <- performance(pred_svm, "tpr", "fpr")
+perf_lr <- performance(pred_lr, "tpr", "fpr")
+
+# Compute AUCs
+auc_rf  <- performance(pred_rf,  "auc")@y.values[[1]]
+auc_c50 <- performance(pred_c50, "auc")@y.values[[1]]
+auc_svm <- performance(pred_svm, "auc")@y.values[[1]]
+auc_lr <- performance(pred_lr, "auc")@y.values[[1]]
+
+
+# Save to PDF for paper
+pdf("fig2_panel_B.pdf", width = 5, height = 5)
+par(mar = c(4, 4, 3, 1), mgp = c(2, 0.7, 0))
+
+# Plot base ROC curvs
+plot(perf_rf,  col = "#E69F00", lwd = 2,
+     main = "ROC Curves on Test Set (n=94)",
+     xlab = "False Positive Rate", ylab = "True Positive Rate")
+
+plot(perf_c50, col = "#009E73", lwd = 2, add = TRUE)
+plot(perf_svm, col = "#CC79A7",   lwd = 2, add = TRUE)
+plot(perf_lr, col = "#0072B2", lwd = 2, add = TRUE)
+
+# Diagonal reference line
+abline(a = 0, b = 1, col = "#999999", lty = 2)
+
+# Legend with AUC values
+legend("bottomright",
+       legend = c(
+         paste0("Random Forest (AUC = ", sprintf("%.3f", auc_rf), ")"),
+         paste0("C5.0 (AUC = ", sprintf("%.3f", auc_c50), ")"),
+         paste0("SVM (RBF) (AUC = ", sprintf("%.3f", auc_svm), ")"),
+         paste0("LR (AUC = ", sprintf("%.3f", auc_lr), ")")
+       ),
+       col = c("#E69F00", "#009E73", "#CC79A7", "#0072B2"),
+       lwd = 2, cex = 0.9, bty = "n")
+
+dev.off()
+```
+
+Class separability:
+
+```{r, fig.width = 5, fig.height = 5}
+rf_probs_df <- dta_classifier_test_new_scaled %>%
+  mutate(
+    truth     = factor(isfakeorreal, levels = c("real","fake")),
+    p_fake_rf = predict(rf_fit_model1_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+  ) %>%
+  select(truth, p_fake_rf)
+
+
+# Save to PDF for paper
+pdf("fig2_panel_C.pdf", width = 5, height = 5)
+par(mar = c(4, 4, 3, 1))
+
+# Plot densities
+ggplot(rf_probs_df, aes(x = p_fake_rf, fill = truth, linetype = truth)) +
+  geom_density(alpha = 0.4, adjust = 1, color = "black", linewidth = 0.8) +
+  geom_vline(xintercept = 0.5, linewidth = 0.7, linetype = "dotted") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_fill_manual(
+    values = c("real" = "#009E73", "fake" = "#E69F00"),
+    name = NULL, labels = c("Real", "Fake")
+  ) +
+  scale_linetype_manual(
+    values = c("real" = "solid", "fake" = "dashed"),
+    name = NULL, labels = c("Real", "Fake")
+  ) +
+  labs(
+    x = "Predicted probability of 'fake' (Random Forest)",
+    y = "Density",
+    title = stringr::str_wrap("Distribution of Predicted Probabilities by True Class",
+                              width = 40)
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 14)
+  )
+dev.off()
+
+```
+
+Decision boundary map:
+
+```{r, fig.width=5, fig.height=5}
+# two features to plot
+f1 <- "diff1x_pacf5_AU17_chin_raiser"
+f2 <- "diff1x_pacf5_AU01_inner_brow_raiser"
+
+df_plot <- dta_classifier_test_new_scaled %>%
+  mutate(truth = factor(isfakeorreal, levels = c("real","fake")))
+
+# Dense grid covering the observed feature range
+make_seq <- function(x, n = 400) {
+  rng <- range(x, na.rm = TRUE)
+  # tiny expansion to avoid white edge slivers
+  seq(rng[1] - 1e-6, rng[2] + 1e-6, length.out = n)
+}
+
+grid_2d <- expand.grid(
+  setNames(list(make_seq(df_plot[[f1]]), make_seq(df_plot[[f2]])), c(f1, f2)),
+  KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE
+)
+
+# Build full newdata with all predictors present
+proto <- dta_classifier_test_new_scaled[1, , drop = FALSE]
+newdata_full <- proto[rep(1, nrow(grid_2d)), , drop = FALSE]
+newdata_full[[f1]] <- grid_2d[[f1]]
+newdata_full[[f2]] <- grid_2d[[f2]]
+
+# Predict CLASS for background and PROB for the contour
+#    type = "raw" -> class labels; type = "prob" -> probabilities
+grid_2d$pred_class <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "raw")
+probs <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "prob")
+grid_2d$prob_fake <- probs[, "fake"]
+
+grid_2d$pred_class <- factor(grid_2d$pred_class, levels = c("real","fake"))
+
+# Plot categorical decision regions + 0.5 contour + points
+ggplot() +
+  # categorical regions (background)
+  geom_raster(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], fill = pred_class),
+    alpha = 0.45
+  ) +
+  # decision boundary at P(fake)=0.5
+  geom_contour(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], z = prob_fake),
+    breaks = 0.5,
+    colour = "black",
+    linewidth = 0.85
+  ) +
+  # data points: shape and fill both mapped to same variable
+  geom_point(
+    data = df_plot,
+    aes(
+      x = .data[[f1]],
+      y = .data[[f2]],
+      shape = truth,
+      fill = truth
+    ),
+    size = 2.8,
+    colour = "black",
+    stroke = 0.4
+  ) +
+  # unified scales for fill and shape
+  scale_fill_manual(
+    name = "",
+    values = c("real" = "#1b9e77", "fake" = "#d95f02"),
+    labels = c("Real", "Fake")
+  ) +
+  scale_shape_manual(
+    name = "",
+    values = c("real" = 21, "fake" = 24),
+    labels = c("Real", "Fake")
+  ) +
+  labs(
+    x = f1, y = f2,
+    title = "Random Forest Decision Boundaries"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+```
+
+Same as before but including training data points:
+
+```{r, fig.width=5, fig.height=5}
+library(ggnewscale)
+
+# two features to plot
+f1 <- "diff1x_pacf5_AU17_chin_raiser"
+f2 <- "diff1x_pacf5_AU01_inner_brow_raiser"
+
+# Data for TEST points
+df_plot_test <- dta_classifier_test_new_scaled %>%
+  mutate(truth = factor(isfakeorreal, levels = c("real","fake")))
+
+# Data for TRAINING points
+df_plot_train <- dta_classifier_train_new_scaled %>%
+  mutate(truth = factor(isfakeorreal, levels = c("real","fake")))
+
+# Dense grid covering the observed feature range
+make_seq <- function(x, var_name, n = 400) {
+  data_rng <- range(x, na.rm = TRUE)
+  
+  # Check the variable name string to set plot-specific ranges
+  plot_rng <- if (identical(f1, var_name)) {
+    c(-2, 2)
+  } else if (identical(f2, var_name)) {
+    c(-4, 2)
+  } else {
+    data_rng
+  }
+  
+  # Use the widest range for the grid
+  final_rng <- c(min(data_rng[1], plot_rng[1]), max(data_rng[2], plot_rng[2]))
+  
+  seq(final_rng[1] - 1e-6, final_rng[2] + 1e-6, length.out = n)
+}
+grid_2d <- expand.grid(
+  setNames(list(make_seq(df_plot_test[[f1]], var_name = f1), 
+                make_seq(df_plot_test[[f2]], var_name = f2)), 
+           c(f1, f2)),
+  KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE
+)
+proto <- dta_classifier_test_new_scaled[1, , drop = FALSE]
+newdata_full <- proto[rep(1, nrow(grid_2d)), , drop = FALSE]
+newdata_full[[f1]] <- grid_2d[[f1]]
+newdata_full[[f2]] <- grid_2d[[f2]]
+grid_2d$pred_class <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "raw")
+probs <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "prob")
+grid_2d$prob_fake <- probs[, "fake"]
+grid_2d$pred_class <- factor(grid_2d$pred_class, levels = c("real","fake"))
+
+
+
+# Save to PDF for paper
+pdf("fig2_panel_E.pdf", width = 5, height = 5)
+par(mar = c(4, 4, 3, 1))
+
+# Plot
+ggplot() +
+  # categorical regions (background)
+  geom_raster(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], fill = pred_class),
+    alpha = 0.45,
+    show.legend = FALSE 
+  ) +
+  # decision boundary at P(fake)=0.5
+  geom_contour(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], z = prob_fake),
+    breaks = 0.5,
+    colour = "black",
+    linewidth = 0.85
+  ) +
+
+  # TEST DATA POINTS & LEGEND
+  geom_point(
+    data = df_plot_test,
+    aes(
+      x = .data[[f1]],
+      y = .data[[f2]],
+      shape = truth,
+      fill = truth
+    ),
+    size = 2.8,
+    colour = "black",
+    stroke = 0.4
+  ) +
+  # Scales for Test Data
+  scale_fill_manual(
+    name = "Test",
+    values = c("real" = "#009E73", "fake" = "#E69F00"),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 2.8, alpha = 1))
+  ) +
+  scale_shape_manual(
+    name = "Test",
+    values = c("real" = 21, "fake" = 24),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 2.8, alpha = 1))
+  ) +
+
+  ggnewscale::new_scale_fill() +
+  ggnewscale::new_scale("shape") +
+
+  geom_point(
+    data = df_plot_train, 
+    aes(
+      x = .data[[f1]],
+      y = .data[[f2]],
+      shape = truth,
+      fill = truth
+    ),
+    size = 1.5,
+    alpha = 0.4,
+    colour = "#000000",
+    stroke = 0.2
+  ) +
+  scale_fill_manual(
+    name = "Train",
+    values = c("real" = "#009E73", "fake" = "#E69F00"),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 1.5, alpha = 0.4))
+  ) +
+  scale_shape_manual(
+    name = "Train",
+    values = c("real" = 21, "fake" = 24),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 1.5, alpha = 0.4))
+  ) +
+
+  coord_cartesian(
+    xlim = c(-2, 2),
+    ylim = c(-4, 2),
+    expand = FALSE
+  ) +
+  labs(
+    x = f1, y = f2,
+    title = "Random Forest Decision Boundaries"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_text(face = "bold")
+  )
+
+dev.off()
+```
+
+Feature importance for RF Model 1:
+
+```{r, fig.width=5, fig.height=5}
+# Extract variable importance
+vi <- caret::varImp(rf_fit_model1_cv)
+vi_df <- vi$importance %>%
+  tibble::rownames_to_column("Feature") %>%
+  arrange(desc(Overall))
+# Shorten feature names
+vi_df <- vi_df %>%
+  mutate(Feature = stringr::str_replace(Feature, "(AU\\d+)_.*", "\\1"))
+
+
+# Save to PDF for paper
+pdf("fig2_panel_D.pdf", width = 5, height = 5)
+par(mar = c(4, 4, 3, 1))
+
+ggplot(vi_df, aes(x = reorder(Feature, Overall), y = Overall)) +
+  geom_col(fill = "#009E73") +
+  geom_text(aes(label = round(Overall, 2)), hjust = -0.2, size = 3.5, fontface = "bold") +
+  coord_flip(clip = "off") +
+  labs(
+    title = "Feature Importance - Random Forest",
+    x = NULL,
+    y = "Importance"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 11, colour = "black")
+  )
+
+dev.off()
+```
+
+Classifier confusion matrices:
+
+```{r, fig.width=10, fig.height=4}
+# Get predictions for all 4 models on the full test set
+pred_rf  <- predict(rf_fit_model1_cv,  newdata = dta_classifier_test_new_scaled)
+pred_c50 <- predict(c50_fit_model1_cv, newdata = dta_classifier_test_new_scaled)
+pred_svm <- predict(svm_model1_cv,     newdata = dta_classifier_test_new_scaled)
+pred_lr  <- predict(lr_model1_cv,      newdata = dta_classifier_test_new_scaled)
+
+# Get the true, actual class
+actual_truth <- dta_classifier_test_new_scaled$isfakeorreal
+
+# Create the raw confusion matrix tables
+cm_rf  <- table(Predicted = pred_rf,  Actual = actual_truth)
+cm_c50 <- table(Predicted = pred_c50, Actual = actual_truth)
+cm_svm <- table(Predicted = pred_svm, Actual = actual_truth)
+cm_lr  <- table(Predicted = pred_lr,  Actual = actual_truth)
+
+# Tidy function
+tidy_cm <- function(cm, title) {
+  as.data.frame(cm) %>%
+    mutate(Model = title) 
+}
+
+# Bind all 4 tables into one data frame
+df_cm_models <- bind_rows(
+  tidy_cm(cm_rf,  "Random Forest"),
+  tidy_cm(cm_c50, "C5.0"),
+  tidy_cm(cm_svm, "SVM (RBF)"),
+  tidy_cm(cm_lr,  "Logistic Regression")
+)
+
+# Optional: Set factor order for the plot
+df_cm_models$Model <- factor(df_cm_models$Model, 
+    levels = c("Random Forest", "C5.0", "SVM (RBF)", "Logistic Regression"))
+
+# Calculate percentages PER MODEL
+df_cm_models <- df_cm_models %>%
+  group_by(Model) %>%
+  mutate(
+    Total = sum(Freq),
+    Percent = Freq / Total
+  ) %>%
+  ungroup()
+
+
+
+# Save to PDF for paper
+pdf("fig2_panel_F.pdf", width = 10, height = 4)
+par(mar = c(4, 4, 3, 1))
+
+ggplot(df_cm_models, aes(x = Actual, y = Predicted, fill = Freq)) +
+  # Use black outlines
+  geom_tile(color = "black", linewidth = 0.6) + 
+  
+  # Use sprintf to add percentages
+  geom_text(aes(label = sprintf("%d\n(%.0f%%)", Freq, 100*Percent)),
+            size = 5, lineheight = 0.95, color = "black") + 
+            
+  scale_fill_gradient(high = "#009E73", low = "white") +
+  
+  # Add coord_equal for square tiles
+  coord_equal() + 
+  
+  facet_wrap(~Model, nrow = 1) + 
+  labs(title = "Confusion Matrices by Classifier",
+       subtitle = "Performance on Test Set (n=94)",
+       fill = "Count") +
+  theme_classic(base_size = 14) +
+  
+  # Updated theme to match agreement matrices
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 13, hjust = 0.5),
+    legend.position = "right",
+    axis.title = element_text(face = "bold", color = "black"),
+    axis.text = element_text(face = "bold", color = "black")
+  )
+dev.off()
+```
+
+ROC Curves by Emotion:
+
+```{r, fig.width = 10, fig.height=5}
+library(ROCR) 
+
+emotion_test_set <- dta_classifier_test_new_scaled %>% filter(emotion == "yes")
+no_emotion_test_set <- dta_classifier_test_new_scaled %>% filter(emotion == "no")
+
+# Extract predicted probabilities (fake class)
+rf_probs_em  <- predict(rf_fit_model1_cv,  newdata = emotion_test_set, type = "prob")[,"fake"]
+c50_probs_em <- predict(c50_fit_model1_cv, newdata = emotion_test_set, type = "prob")[,"fake"]
+svm_probs_em <- predict(svm_model1_cv,     newdata = emotion_test_set, type = "prob")[,"fake"]
+lr_probs_em <- predict(lr_model1_cv, newdata = emotion_test_set, type = "prob")[,"fake"]
+
+# True outcome (must be numeric 0/1)
+true_class_em <- ifelse(emotion_test_set$isfakeorreal == "fake", 1, 0)
+
+# Build ROCR prediction objects
+pred_rf_em  <- prediction(rf_probs_em,  true_class_em)
+pred_c50_em <- prediction(c50_probs_em, true_class_em)
+pred_svm_em <- prediction(svm_probs_em, true_class_em)
+pred_lr_em <- prediction(lr_probs_em, true_class_em)
+
+# Performance objects for TPR/FPR
+perf_rf_em  <- performance(pred_rf_em,  "tpr", "fpr")
+perf_c50_em <- performance(pred_c50_em, "tpr", "fpr")
+perf_svm_em <- performance(pred_svm_em, "tpr", "fpr")
+perf_lr_em <- performance(pred_lr_em, "tpr", "fpr")
+
+# Compute AUCs
+auc_rf_em  <- performance(pred_rf_em,  "auc")@y.values[[1]]
+auc_c50_em <- performance(pred_c50_em, "auc")@y.values[[1]]
+auc_svm_em <- performance(pred_svm_em, "auc")@y.values[[1]]
+auc_lr_em <- performance(pred_lr_em, "auc")@y.values[[1]]
+
+# Extract predicted probabilities (fake class)
+rf_probs_no_em  <- predict(rf_fit_model1_cv,  newdata = no_emotion_test_set, type = "prob")[,"fake"]
+c50_probs_no_em <- predict(c50_fit_model1_cv, newdata = no_emotion_test_set, type = "prob")[,"fake"]
+svm_probs_no_em <- predict(svm_model1_cv,     newdata = no_emotion_test_set, type = "prob")[,"fake"]
+lr_probs_no_em <- predict(lr_model1_cv, newdata = no_emotion_test_set, type = "prob")[,"fake"]
+
+# True outcome (must be numeric 0/1)
+true_class_no_em <- ifelse(no_emotion_test_set$isfakeorreal == "fake", 1, 0)
+
+# Build ROCR prediction objects
+pred_rf_no_em  <- prediction(rf_probs_no_em,  true_class_no_em)
+pred_c50_no_em <- prediction(c50_probs_no_em, true_class_no_em)
+pred_svm_no_em <- prediction(svm_probs_no_em, true_class_no_em)
+pred_lr_no_em <- prediction(lr_probs_no_em, true_class_no_em)
+
+# Performance objects for TPR/FPR
+perf_rf_no_em  <- performance(pred_rf_no_em,  "tpr", "fpr")
+perf_c50_no_em <- performance(pred_c50_no_em, "tpr", "fpr")
+perf_svm_no_em <- performance(pred_svm_no_em, "tpr", "fpr")
+perf_lr_no_em <- performance(pred_lr_no_em, "tpr", "fpr")
+
+# Compute AUCs
+auc_rf_no_em  <- performance(pred_rf_no_em,  "auc")@y.values[[1]]
+auc_c50_no_em <- performance(pred_c50_no_em, "auc")@y.values[[1]]
+auc_svm_no_em <- performance(pred_svm_no_em, "auc")@y.values[[1]]
+auc_lr_no_em <- performance(pred_lr_no_em, "auc")@y.values[[1]]
+
+
+# Plot
+# Save to PDF for paper
+pdf("fig3_panel_C_D.pdf", width = 10, height = 5)
+par(mfrow = c(1, 2), mar = c(5, 4, 4, 2) + 0.1, mgp = c(1.8, 0.7, 0)) # mar adjusts margins
+
+# Emotion vids first
+plot(perf_rf_em,  col = "#E69F00", lwd = 2,
+     main = "Emotion Videos (n=58)",
+     xlab = "False Positive Rate", ylab = "True Positive Rate")
+
+plot(perf_c50_em, col = "#009E73", lwd = 2, add = TRUE)
+plot(perf_svm_em, col = "#CC79A7",   lwd = 2, add = TRUE)
+plot(perf_lr_em, col = "#0072B2", lwd = 2, add = TRUE)
+
+# Diagonal reference line
+abline(a = 0, b = 1, col = "#999999", lty = 2)
+
+# Legend with AUC values
+legend("bottomright",
+       legend = c(
+         paste0("Random Forest (AUC = ", sprintf("%.3f", auc_rf_em), ")"),
+         paste0("C5.0 (AUC = ", sprintf("%.3f", auc_c50_em), ")"),
+         paste0("SVM (RBF) (AUC = ", sprintf("%.3f", auc_svm_em), ")"),
+         paste0("LR (AUC =", sprintf("%.3f", auc_lr_em), ")")
+       ),
+       col = c("#E69F00", "#009E73", "#CC79A7", "#0072B2"),
+       lwd = 2, cex = 0.8, bty = "n") # cex=0.8 makes text slightly smaller
+
+
+# No emotion vids
+plot(perf_rf_no_em,  col = "#E69F00", lwd = 2,
+     main = "No Emotion Videos (n=36)",
+     xlab = "False Positive Rate", ylab = "True Positive Rate")
+
+plot(perf_c50_no_em, col = "#009E73", lwd = 2, add = TRUE)
+plot(perf_svm_no_em, col = "#CC79A7",   lwd = 2, add = TRUE)
+plot(perf_lr_no_em, col = "#0072B2", lwd = 2, add = TRUE)
+
+# Diagonal reference line
+abline(a = 0, b = 1, col = "#999999", lty = 2)
+
+# Legend with AUC values
+legend("bottomright",
+       legend = c(
+         paste0("Random Forest (AUC = ", sprintf("%.3f", auc_rf_no_em), ")"),
+         paste0("C5.0 (AUC = ", sprintf("%.3f", auc_c50_no_em), ")"),
+         paste0("SVM (RBF) (AUC = ", sprintf("%.3f", auc_svm_no_em), ")"),
+         paste0("LR (AUC = ", sprintf("%.3f", auc_lr_no_em), ")")
+       ),
+       col = c("#E69F00", "#009E73", "#CC79A7", "#0072B2"),
+       lwd = 2, cex = 0.8, bty = "n")
+
+# Reset plotting area to default (1x1)
+par(mfrow = c(1, 1))
+dev.off()
+```
+
+Density plots by Emotion:
+
+```{r, fig.width=10, fig.height=5}
+emotion_test_set <- dta_classifier_test_new_scaled %>% filter(emotion == "yes")
+no_emotion_test_set <- dta_classifier_test_new_scaled %>% filter(emotion == "no")
+
+# Emotion vids
+rf_probs_df_em <- emotion_test_set %>%
+  mutate(
+    truth     = factor(isfakeorreal, levels = c("real","fake")),
+    p_fake_rf = predict(rf_fit_model1_cv, newdata = ., type = "prob")[,"fake"]
+  ) %>%
+  select(truth, p_fake_rf)
+
+# Calculate densities
+# We use from=0, to=1 to keep the density calculation within the 0-1 probability range
+dens_em_real <- density(rf_probs_df_em$p_fake_rf[rf_probs_df_em$truth == "real"], from = 0, to = 1, adjust = 1)
+dens_em_fake <- density(rf_probs_df_em$p_fake_rf[rf_probs_df_em$truth == "fake"], from = 0, to = 1, adjust = 1)
+
+
+# No Emotion vids
+rf_probs_df_no_em <- no_emotion_test_set %>%
+  mutate(
+    truth     = factor(isfakeorreal, levels = c("real","fake")),
+    p_fake_rf = predict(rf_fit_model1_cv, newdata = ., type = "prob")[,"fake"]
+  ) %>%
+  select(truth, p_fake_rf)
+
+# Calculate densities
+dens_no_em_real <- density(rf_probs_df_no_em$p_fake_rf[rf_probs_df_no_em$truth == "real"], from = 0, to = 1, adjust = 1)
+dens_no_em_fake <- density(rf_probs_df_no_em$p_fake_rf[rf_probs_df_no_em$truth == "fake"], from = 0, to = 1, adjust = 1)
+
+# Plot
+# Save to PDF for paper
+pdf("fig3_panel_E_F.pdf", width = 10, height = 5)
+
+par(mfrow = c(1, 2), mar = c(5, 4, 4, 2) + 0.1, mgp = c(1.7, 0.7, 0))
+
+col_real <- "#009E73"
+col_fake <- "#E69F00"
+# Create transparent versions
+col_real_fill <- adjustcolor(col_real, alpha.f = 0.4)
+col_fake_fill <- adjustcolor(col_fake, alpha.f = 0.4)
+
+
+# Get Y-axis limits to fit both densities
+#ylim_em <- range(0, dens_em_real$y, dens_em_fake$y)
+
+# Shared y-axis limit for both plots
+ylim_shared <- range(0, dens_em_real$y, dens_em_fake$y, 
+                        dens_no_em_real$y, dens_no_em_fake$y)
+
+# Set up the empty plot
+plot(NULL,
+     main = "Emotion Videos (n=58)",
+     xlab = "Predicted probability of 'fake'", ylab = "Density",
+     xlim = c(0, 1), ylim = ylim_shared
+)
+
+# Add shaded polygons
+polygon(dens_em_real, col = col_real_fill, border = NA)
+polygon(dens_em_fake, col = col_fake_fill, border = NA)
+
+# Add lines on top
+lines(dens_em_real, lty = "solid", lwd = 2, col = "black")
+lines(dens_em_fake, lty = "dashed", lwd = 2, col = "black")
+
+# Add vline and legend
+abline(v = 0.5, lty = "dotted", lwd = 2, col = "black")
+legend("topright",
+       legend = c("Real", "Fake"),
+       fill = c(col_real_fill, col_fake_fill),
+       border = c("black", "black"),
+       lty = c("solid", "dashed"),
+       lwd = 2,
+       bty = "n", 
+       cex = 0.9
+)
+
+
+# Get Y-axis limits
+#ylim_no_em <- range(0, dens_no_em_real$y, dens_no_em_fake$y)
+
+# Set up the empty plot
+plot(NULL,
+     main = "No Emotion Videos (n=36)",
+     xlab = "Predicted probability of 'fake'", ylab = "Density",
+     xlim = c(0, 1), ylim = ylim_shared
+)
+
+# Add shaded polygons
+polygon(dens_no_em_real, col = col_real_fill, border = NA)
+polygon(dens_no_em_fake, col = col_fake_fill, border = NA)
+
+# Add lines on top
+lines(dens_no_em_real, lty = "solid", lwd = 2, col = "black")
+lines(dens_no_em_fake, lty = "dashed", lwd = 2, col = "black")
+
+# Add vline and legend
+abline(v = 0.5, lty = "dotted", lwd = 2, col = "black")
+legend("topright",
+       legend = c("Real", "Fake"),
+       fill = c(col_real_fill, col_fake_fill),
+       border = c("black", "black"),
+       lty = c("solid", "dashed"),
+       lwd = 2,
+       bty = "n",
+       cex = 0.9
+)
+
+# Reset plotting area to default (1x1)
+par(mfrow = c(1, 1))
+dev.off()
+```
+
+Decision boundary map by Emotion:
+
+```{r, fig.width=8, fig.height=5}
+# two features to plot (same as before)
+f1 <- "diff1x_pacf5_AU17_chin_raiser"
+f2 <- "diff1x_pacf5_AU01_inner_brow_raiser"
+
+# grid calculation
+make_seq <- function(x, n = 400) {
+  rng <- range(x, na.rm = TRUE)
+  seq(rng[1] - 1e-6, rng[2] + 1e-6, length.out = n)
+}
+
+grid_2d <- expand.grid(
+  setNames(list(make_seq(dta_classifier_test_new_scaled[[f1]]), 
+                make_seq(dta_classifier_test_new_scaled[[f2]])), c(f1, f2)),
+  KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE
+)
+
+proto <- dta_classifier_test_new_scaled[1, , drop = FALSE]
+newdata_full <- proto[rep(1, nrow(grid_2d)), , drop = FALSE]
+newdata_full[[f1]] <- grid_2d[[f1]]
+newdata_full[[f2]] <- grid_2d[[f2]]
+
+grid_2d$pred_class <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "raw")
+probs <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "prob")
+grid_2d$prob_fake <- probs[, "fake"]
+grid_2d$pred_class <- factor(grid_2d$pred_class, levels = c("real","fake"))
+
+
+df_plot_faceted <- dta_classifier_test_new_scaled %>%
+  mutate(
+    truth = factor(isfakeorreal, levels = c("real","fake")),
+    Condition = factor(emotion, 
+                       levels = c("yes", "no"), 
+                       labels = c("Emotion Videos (n=58)", "No Emotion Videos (n=36)"))
+  )
+
+
+# Plot
+ggplot() +
+  # background
+  geom_raster(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], fill = pred_class),
+    alpha = 0.45
+  ) +
+  # boundary
+  geom_contour(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], z = prob_fake),
+    breaks = 0.5,
+    colour = "black",
+    linewidth = 0.85
+  ) +
+  # data points
+  geom_point(
+    data = df_plot_faceted, 
+    aes(
+      x = .data[[f1]],
+      y = .data[[f2]],
+      shape = truth,
+      fill = truth
+    ),
+    size = 2.8,
+    colour = "black",
+    stroke = 0.4
+  ) +
+  
+  scale_fill_manual(
+    name = "",
+    values = c("real" = "#009E73", "fake" = "#E69F00"),
+    labels = c("Real", "Fake")
+  ) +
+  scale_shape_manual(
+    name = "",
+    values = c("real" = 21, "fake" = 24),
+    labels = c("Real", "Fake")
+  ) +
+  
+  facet_wrap(~ Condition) +
+  
+  labs(
+    x = f1, y = f2,
+    title = "Random Forest Decision Boundaries by Emotional Content"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold", size = 12)
+  )
+```
+
+Decision boundary map by Emotion with train data overlay:
+
+```{r, fig.width=8, fig.height=5}
+library(ggnewscale)
+
+# two features to plot
+f1 <- "diff1x_pacf5_AU17_chin_raiser"
+f2 <- "diff1x_pacf5_AU01_inner_brow_raiser"
+
+df_plot_test <- dta_classifier_test_new_scaled %>%
+  mutate(
+    truth = factor(isfakeorreal, levels = c("real","fake")),
+    Condition = factor(emotion, 
+                       levels = c("yes", "no"), 
+                       labels = c("Emotion Videos (n=58)", "No Emotion Videos (n=36)")) 
+  )
+
+df_plot_train <- dta_classifier_train_new_scaled %>%
+  mutate(
+    truth = factor(isfakeorreal, levels = c("real","fake")),
+    Condition = factor(emotion, 
+                       levels = c("yes", "no"), 
+                       labels = c("Emotion Videos (n=58)", "No Emotion Videos (n=36)"))
+  )
+  
+make_seq <- function(x, var_name, n = 400) {
+  data_rng <- range(x, na.rm = TRUE)
+  plot_rng <- if (identical(f1, var_name)) {
+    c(-2, 2)
+  } else if (identical(f2, var_name)) {
+    c(-4, 2)
+  } else {
+    data_rng
+  }
+  final_rng <- c(min(data_rng[1], plot_rng[1]), max(data_rng[2], plot_rng[2]))
+  seq(final_rng[1] - 1e-6, final_rng[2] + 1e-6, length.out = n)
+}
+grid_2d <- expand.grid(
+  setNames(list(make_seq(dta_classifier_test_new_scaled[[f1]], var_name = f1), 
+                make_seq(dta_classifier_test_new_scaled[[f2]], var_name = f2)), 
+           c(f1, f2)),
+  KEEP.OUT.ATTRS = FALSE, stringsAsFactors = FALSE
+)
+proto <- dta_classifier_test_new_scaled[1, , drop = FALSE]
+newdata_full <- proto[rep(1, nrow(grid_2d)), , drop = FALSE]
+newdata_full[[f1]] <- grid_2d[[f1]]
+newdata_full[[f2]] <- grid_2d[[f2]]
+grid_2d$pred_class <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "raw")
+probs <- predict(rf_fit_model1_cv, newdata = newdata_full, type = "prob")
+grid_2d$prob_fake <- probs[, "fake"]
+grid_2d$pred_class <- factor(grid_2d$pred_class, levels = c("real","fake"))
+
+# Plot
+# Save to PDF for paper
+#pdf("fig3_panel_G_H.pdf", width = 8, height = 5)
+
+ggplot() +
+  # Background and boundary 
+  geom_raster(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], fill = pred_class),
+    alpha = 0.45,
+    show.legend = FALSE
+  ) +
+  geom_contour(
+    data = grid_2d,
+    aes(x = .data[[f1]], y = .data[[f2]], z = prob_fake),
+    breaks = 0.5, colour = "black", linewidth = 0.85
+  ) +
+
+  geom_point(
+    data = df_plot_test, 
+    aes(
+      x = .data[[f1]],
+      y = .data[[f2]],
+      shape = truth,
+      fill = truth
+    ),
+    size = 2.8,
+    colour = "black",
+    stroke = 0.4
+  ) +
+  scale_fill_manual(
+    name = "Test", 
+    values = c("real" = "#009E73", "fake" = "#E69F00"),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 2.8, alpha = 1)) 
+  ) +
+  scale_shape_manual(
+    name = "Test", 
+    values = c("real" = 21, "fake" = 24),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 2.8, alpha = 1)) 
+  ) +
+
+  ggnewscale::new_scale_fill() +
+  ggnewscale::new_scale("shape") +
+
+  geom_point(
+    data = df_plot_train, 
+    aes(
+      x = .data[[f1]],
+      y = .data[[f2]],
+      shape = truth,
+      fill = truth
+    ),
+    size = 1.5,
+    alpha = 0.4, 
+    colour = "black",
+    stroke = 0.2
+  ) +
+  scale_fill_manual(
+    name = "Train", 
+    values = c("real" = "#009E73", "fake" = "#E69F00"),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 1.5, alpha = 0.4)) 
+  ) +
+  scale_shape_manual(
+    name = "Train", 
+    values = c("real" = 21, "fake" = 24),
+    labels = c("Real", "Fake"),
+    guide = guide_legend(override.aes = list(size = 1.5, alpha = 0.4)) 
+  ) +
+
+  facet_wrap(~ Condition) + 
+  
+  coord_cartesian(
+    xlim = c(-2, 2),
+    ylim = c(-4, 2),
+    expand = FALSE
+  ) +
+  labs(
+    x = f1, y = f2,
+    title = ""
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "top",
+    legend.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold", size = 12)
+  )
+#dev.off()
+```
+
+Emotion bar chart revised:
+
+```{r, fig.width=3, fig.height=5}
+# Save to PDF for paper
+pdf("fig3_panel_A.pdf", width = 3, height = 5)
+par(mar = c(4, 4, 3, 1))
+
+ggplot(
+  data = data.frame(
+    Condition = factor(c("Emotion", "No Emotion"),
+                       levels = c("Emotion", "No Emotion")),
+    Accuracy  = c(72.4, 55.6),
+    CI_low    = c(59.8, 39.6),
+    CI_high   = c(82.2, 70.5),
+    p_label   = c("p < .001", "p = .309"),
+    vjust_val = c(-4, -6)
+  ),
+  aes(x = Condition, y = Accuracy, fill = Condition) 
+) +
+  geom_col(width = 0.6, color = "black") + 
+  geom_errorbar(aes(ymin = CI_low, ymax = CI_high),
+                width = 0.2, size = 0.8, color = "black") + 
+  geom_hline(yintercept = 50, linetype = "dashed",
+             colour = "black", size = 0.6) + 
+  annotate("text", x = 2.2, y = 50, label = "",
+           hjust = -1.1, vjust = -0.5, size = 4, colour = "black") +
+  
+  geom_text(aes(label = p_label, vjust = vjust_val), size = 5) + 
+  
+  scale_fill_manual(
+    values = c("Emotion" = "#009E73", "No Emotion" = "#009E73"),
+    guide = "none" 
+  ) +
+  
+  scale_y_continuous(limits = c(0, 100),
+                     expand = expansion(mult = c(0, 0.08))) +
+  labs(y = "Accuracy (%)", x = NULL) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.text.x  = element_text(size = 12, color = "black", margin = margin(t=5)), 
+    axis.text.y = element_text(size = 14, color = "black"), 
+    axis.title.y = element_text(size = 14, face = "bold"),
+    plot.margin  = margin(10, 10, 10, 10)
+  )
+dev.off()
+```
+
+Updated PLD vs Full Stim bar chart:
+
+```{r, fig.width=6, fig.height=6}
+ggplot(
+  data = data.frame(
+    Stimuli = factor(
+      c("Full Stimuli", "Point Light Display", "Point Light Display"),
+      levels = c("Full Stimuli", "Point Light Display")
+    ),
+    Method = factor(
+      c("Human Observers", "Random Forest", "Human Observers"),
+      levels = c("Human Observers", "Random Forest")
+    ),
+    Accuracy = c(88.33, 55.00, 50.51),
+    CI_low  = c(80.0,  39.8,  40.3),
+    CI_high = c(93.5,  69.3,  60.7)
+  ),
+  aes(x = Stimuli, y = Accuracy, fill = Method)
+) +
+  geom_col(position = position_dodge(width = 0.65), width = 0.6, color = "black") + # <-- Added outline
+  geom_errorbar(
+    aes(ymin = CI_low, ymax = CI_high),
+    position = position_dodge(width = 0.65),
+    width = 0.2, size = 0.8, color = "black" # <-- Set color to black
+  ) +
+  geom_hline(yintercept = 50, linetype = "dashed",
+             colour = "black", size = 0.6) + # <-- Changed to black
+  annotate("text", x = 1.55, y = 50, label = "NIR (0.5)", # <-- Adjusted x-position
+           hjust = -2.7, vjust = -0.5, size = 4, colour = "black") + # <-- Changed to black
+  scale_y_continuous(limits = c(0, 100),
+                     expand = expansion(mult = c(0, 0.08))) +
+  
+  # --- Use your established color palette ---
+  scale_fill_manual(values = c("Human Observers" = "#1b9e77",
+                               "Random Forest"   = "#d95f02")) +
+  
+  labs(x = NULL, y = "Accuracy (%)", fill = NULL) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 18, color = "black"),
+    axis.title.y = element_text(size = 18, face = "bold", color = "black"),
+    axis.text.y = element_text(size = 18, color = "black"),
+    axis.text.x = element_text(size = 18, color = "black"),
+    plot.margin  = margin(10, 10, 10, 10)
+  )
+```
+
+Updated Emotion vs No Emotion confusion matrices:
+
+```{r, fig.width=7, fig.height=5}
+# Filter subsets
+emotion_test <- dta_classifier_test_new_scaled %>% filter(emotion == "yes")
+no_emotion_test <- dta_classifier_test_new_scaled %>% filter(emotion == "no")
+
+# Model predictions
+pred_emotion    <- predict(rf_fit_model1_cv, newdata = emotion_test)
+pred_no_emotion <- predict(rf_fit_model1_cv, newdata = no_emotion_test)
+
+# Raw confusion matrices
+cm_emotion <- table(Predicted = pred_emotion, Actual = emotion_test$isfakeorreal)
+cm_no_emotion <- table(Predicted = pred_no_emotion, Actual = no_emotion_test$isfakeorreal)
+
+# Convert to tidy format
+tidy_cm <- function(cm, title) {
+  as.data.frame(cm) %>%
+    mutate(Condition = title)
+}
+
+df_cm <- bind_rows(
+  tidy_cm(cm_emotion,    "Emotion Videos"),
+  tidy_cm(cm_no_emotion, "No Emotion Videos")
+)
+
+# calculate percentages PER FACET
+# This calculates the % within each 2x2 grid
+df_cm <- df_cm %>%
+  group_by(Condition) %>%
+  mutate(
+    Total = sum(Freq),
+    Percent = Freq / Total
+  ) %>%
+  ungroup()
+
+
+p_cm <- df_cm %>%
+  ggplot(aes(x = Actual, y = Predicted, fill = Freq)) +
+  
+  # black outlines
+  geom_tile(color = "black", linewidth = 0.6) +
+  
+  # percentages
+  geom_text(aes(label = sprintf("%d\n(%.0f%%)", Freq, 100*Percent)),
+            size = 5, lineheight = 0.95, color = "black") +
+            
+  scale_fill_gradient(low = "white", high = "#009E73") +
+  
+  # Add coord_equal for square tiles
+  coord_equal() +
+  
+  facet_wrap(~Condition, nrow = 1) +
+  labs(title = "Confusion Matrices by Emotional Content",
+       subtitle = "Performance on Test Set (n=94)",
+       fill = "Count") +
+  theme_classic(base_size = 14) +
+  
+  # Updated theme to match agreement matrices
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 13, hjust = 0.5),
+    legend.position = "right",
+    axis.title = element_text(face = "bold", color = "black"), 
+    axis.text = element_text(face = "bold", color = "black")
+  )
+
+# Save to PDF for paper
+pdf("fig3_panel_B.pdf", width=7, height=5)
+par(mar = c(4, 4, 3, 1))
+p_cm
+dev.off()
+```
+
+Feature graphs:
+
+```{r, fig.width=5, fig.height=5}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+boruta_selected_features <- c(
+  "diff1x_pacf5_AU17_chin_raiser",
+  "diff1x_pacf5_AU01_inner_brow_raiser",
+  "diff2_acf1_AU01_inner_brow_raiser",
+  "diff2_acf10_AU12_lip_corner_puller",
+  "max_kl_shift_AU12_lip_corner_puller",
+  "diff1_acf1_AU12_lip_corner_puller",
+  "lumpiness_AU12_lip_corner_puller",
+  "diff2_acf1_AU12_lip_corner_puller"
+)
+
+# pretty_names <- c(
+#   "diff1x_pacf5_AU17_chin_raiser"       = "PACF(5) \u0394 AU17",
+#   "diff1x_pacf5_AU01_inner_brow_raiser" = "PACF(5) \u0394 AU01",
+#   "diff2_acf1_AU01_inner_brow_raiser"   = "ACF(1) \u0394\u00B2 AU01",
+#   "diff2_acf10_AU12_lip_corner_puller"  = "ACF(10) \u0394\u00B2 AU12",
+#   "max_kl_shift_AU12_lip_corner_puller" = "Max KL Shift AU12",
+#   "diff1_acf1_AU12_lip_corner_puller"   = "ACF(1) \u0394 AU12",
+#   "lumpiness_AU12_lip_corner_puller"    = "Lumpiness AU12",
+#   "diff2_acf1_AU12_lip_corner_puller"   = "ACF(1) \u0394\u00B2 AU12"
+# )
+
+pretty_names <- c(
+  "diff1x_pacf5_AU17_chin_raiser"       = "diff1x_pacf5_AU17",
+  "diff1x_pacf5_AU01_inner_brow_raiser" = "diff1x_pacf5_AU01",
+  "diff2_acf1_AU01_inner_brow_raiser"   = "diff2_acf1_AU01",
+  "diff2_acf10_AU12_lip_corner_puller"  = "diff2_acf10_AU12",
+  "max_kl_shift_AU12_lip_corner_puller" = "max_kl_shift_AU12",
+  "diff1_acf1_AU12_lip_corner_puller"   = "diff1_acf1_AU12",
+  "lumpiness_AU12_lip_corner_puller"    = "lumpiness_AU12",
+  "diff2_acf1_AU12_lip_corner_puller"   = "diff2_acf1_AU12"
+)
+
+
+plot_df <- dta_classifier_train_new_scaled %>%
+  select(isfakeorreal, all_of(boruta_selected_features)) %>%
+  pivot_longer(
+    cols = all_of(boruta_selected_features),
+    names_to = "Feature",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Feature = factor(Feature,
+                     levels = boruta_selected_features,
+                     labels = pretty_names)
+  )
+
+fill_pal <- c("real" = "#009E73", "fake" = "#E69F00")
+
+
+# Save to PDF for paper
+pdf("fig5_panel_C.pdf", width = 5, height = 5)
+
+ggplot(plot_df, aes(x = isfakeorreal, y = Value, fill = isfakeorreal)) +
+  
+  # Violin plot
+  geom_violin(
+    width = 0.9, 
+    trim = TRUE, 
+    alpha = 0.3,
+    color = "black", 
+    linewidth = 0.3
+  ) +
+  
+  # Boxplot
+  geom_boxplot(
+    width = 0.25, 
+    outlier.shape = 16, 
+    outlier.size = 0.8,
+    color = "black", 
+    linewidth = 0.4, 
+    alpha = 0.9
+  ) +
+  
+  facet_wrap(
+    ~ Feature, 
+    ncol = 2, 
+    nrow = 4, 
+    scales = "free_y"
+  ) +
+  
+  # Apply colors and labels
+  scale_fill_manual(values = fill_pal, labels = c("Real", "Fake")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  labs(
+    title = "Distribution of Final Selected Features",
+    x = NULL,
+    y = "Z-scored Value",
+    fill = "Class"
+  ) +
+  
+  theme_classic(base_size = 10) + 
+  theme(
+    legend.position = "top",
+    legend.title = element_text(size = 9, face = "bold"),
+    legend.text = element_text(size = 9),
+    
+    strip.text = element_text(size = 9, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "grey90", color = "grey50"),
+    
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    axis.title.y = element_text(size = 10, face = "bold"),
+    
+    axis.text.x = element_text(size = 9, color = "black"),
+    axis.text.y = element_text(size = 8, color = "black"),
+    
+    panel.border = element_rect(color = "grey80", fill = NA, linewidth = 0.5)
+  )
+dev.off()
+```
+
+```{r, fig.height=5, fig.width=5}
+# --- 1. Final selected features (from your script) ---
+boruta_selected_features <- c(
+  "diff1x_pacf5_AU17_chin_raiser",
+  "diff1x_pacf5_AU01_inner_brow_raiser",
+  "diff2_acf1_AU01_inner_brow_raiser",
+  "diff2_acf10_AU12_lip_corner_puller",
+  "max_kl_shift_AU12_lip_corner_puller",
+  "diff1_acf1_AU12_lip_corner_puller",
+  "lumpiness_AU12_lip_corner_puller",
+  "diff2_acf1_AU12_lip_corner_puller"
+)
+
+# --- 2. Pretty names for plot facets (using Unicode for Δ and ²) ---
+pretty_names <- c(
+  "diff1x_pacf5_AU17_chin_raiser"       = "PACF(5) \u0394 AU17",
+  "diff1x_pacf5_AU01_inner_brow_raiser" = "PACF(5) \u0394 AU01",
+  "diff2_acf1_AU01_inner_brow_raiser"   = "ACF(1) \u0394\u00B2 AU01",
+  "diff2_acf10_AU12_lip_corner_puller"  = "ACF(10) \u0394\u00B2 AU12",
+  "max_kl_shift_AU12_lip_corner_puller" = "Max KL Shift AU12",
+  "diff1_acf1_AU12_lip_corner_puller"   = "ACF(1) \u0394 AU12",
+  "lumpiness_AU12_lip_corner_puller"    = "Lumpiness AU12",
+  "diff2_acf1_AU12_lip_corner_puller"   = "ACF(1) \u0394\u00B2 AU12"
+)
+
+# --- 3. Prepare data for plotting ---
+plot_df <- dta_classifier_train_new_scaled %>%
+  select(isfakeorreal, all_of(boruta_selected_features)) %>%
+  pivot_longer(
+    cols = all_of(boruta_selected_features),
+    names_to = "Feature",
+    values_to = "Value"
+  ) %>%
+  # Apply the pretty names and set factor order
+  mutate(
+    Feature = factor(Feature,
+                     levels = boruta_selected_features,
+                     labels = pretty_names),
+    # Ensure consistent factor levels for isfakeorreal
+    isfakeorreal = factor(isfakeorreal, levels = c("real", "fake"))
+  )
+plot_df <- plot_df %>%
+  group_by(Feature) %>%
+  filter(
+    Value >= quantile(Value, 0.005, na.rm = TRUE),
+    Value <= quantile(Value, 0.995, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# --- 4. Define color palette ---
+fill_pal <- c("real" = "#1b9e77", "fake" = "#d95f02")
+
+# --- 5. Create the 2x4 plot ---
+p <- ggplot(plot_df, aes(x = isfakeorreal, y = Value, fill = isfakeorreal)) +
+  
+  # Violin plot
+  geom_violin(
+    width = 0.8, 
+    trim = TRUE, 
+    alpha = 0.3,
+    color = "black", 
+    linewidth = 0.3
+  ) +
+  
+  # Boxplot
+  geom_boxplot(
+    width = 0.25, 
+    outlier.shape = 16, 
+    outlier.size = 0.5,
+    outlier.alpha = 0.5,
+    color = "black", 
+    linewidth = 0.35, 
+    alpha = 0.8
+  ) +
+  
+  # Facet into 2 columns and 4 rows
+  facet_wrap(
+    ~ Feature, 
+    ncol = 2, 
+    nrow = 4, 
+    scales = "free_y"
+  ) +
+  
+  # Apply colors and labels
+  scale_fill_manual(
+    values = fill_pal, 
+    labels = c("real" = "Real", "fake" = "Fake")
+  ) +
+  scale_x_discrete(
+    labels = c("real" = "Real", "fake" = "Fake")
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  
+  labs(
+    title = "Distribution of Final Selected Features",
+    x = NULL,
+    y = "Standardised Value (z-score)",
+    fill = "Video Class"
+  ) +
+  
+  # --- 6. Theme optimized for publication ---
+  theme_classic(base_size = 8) +
+  theme(
+    # Font family
+    text = element_text(family = "Arial"),
+    
+    # Legend
+    legend.position = "top",
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.margin = margin(0, 0, 3, 0),
+    
+    # Facet titles (the feature names)
+    strip.text = element_text(size = 8, face = "bold", color = "black"),
+    strip.background = element_rect(fill = "grey90", color = "grey50", linewidth = 0.3),
+    
+    # Title and axis labels
+    plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+    axis.title.y = element_text(size = 8, face = "bold"),
+    axis.title.x = element_blank(),
+    
+    # Axis text
+    axis.text.x = element_text(size = 7, color = "black"),
+    axis.text.y = element_text(size = 7, color = "black"),
+    
+    # Panel
+    panel.border = element_rect(color = "grey70", fill = NA, linewidth = 0.3),
+    panel.spacing = unit(0.3, "cm"),
+    
+    # Lines
+    axis.line = element_line(linewidth = 0.3),
+    axis.ticks = element_line(linewidth = 0.3),
+    
+    # Margins
+    plot.margin = margin(5, 5, 5, 5)
+  )
+
+print(p)
+
+
+ggsave(
+  "feature_distributions.pdf",
+  plot = p,
+  width = 5,
+  height = 5,
+  device = cairo_pdf
+)
+
+```
+
+AU Before and After Smoothing By Real and Fake:
+
+```{r, fig.height=5, fig.width=10}
+dta_agg_long <- dta_preprocessed_smth %>%
+  # Make sure to select the new variable
+  select(frame, AU17_r, smth_AU17_r, isfakeorreal) %>% 
+  tidyr::pivot_longer(
+    cols = c(AU17_r, smth_AU17_r),
+    names_to = "Type",
+    values_to = "Intensity"
+  ) %>%
+  group_by(isfakeorreal, frame, Type) %>%
+  # mean intensity for real and fake
+  summarise(
+    Intensity = mean(Intensity, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+base_theme <- theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.title.y = element_text(size = 18, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 18, color = "black"),
+    axis.text.y  = element_text(size = 16, color = "black"),
+    axis.text.x  = element_text(size = 16, color = "black"),
+    plot.title   = element_text(size = 18, face = "bold", color = "black", hjust = 0.5),
+    plot.margin  = margin(10, 10, 10, 10),
+    strip.background = element_rect(fill = "grey90", color = NA),
+    strip.text = element_text(size = 16, face = "bold", color = "black")
+  )
+
+# Calculate common y axis range
+y_limits <- range(dta_agg_long$Intensity, na.rm = T)
+
+# plot 1
+p_raw <- dta_agg_long %>%
+  filter(Type == "AU17_r") %>%
+  ggplot(aes(x = frame, y = Intensity)) +
+  geom_line(color = "#1b9e77", alpha = 0.6, linewidth = 0.8) +
+  facet_wrap(~ isfakeorreal) +
+  labs(
+    title = "Raw",
+    x = NULL,
+    y = "AU Intensity"
+  ) +
+  scale_y_continuous(limits = y_limits, expand = expansion(mult = c(0, 0.08))) +
+  base_theme
+
+# plot 2
+p_smth <- dta_agg_long %>%
+  filter(Type == "smth_AU17_r") %>%
+  ggplot(aes(x = frame, y = Intensity)) +
+  geom_line(color = "#d95f02", linewidth = 0.8) +
+  facet_wrap(~ isfakeorreal) +
+  labs(
+    title = "Smoothed",
+    x = "Frame",
+    y = "AU Intensity"
+  ) +
+  scale_y_continuous(limits = y_limits, expand = expansion(mult = c(0, 0.08))) +
+  base_theme
+
+# combine plots
+p_raw / p_smth +
+  plot_annotation(
+    title = "AU17 - Before vs. After Smoothing", 
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5, color = "black")
+    )
+  )
+```
+
+For two videos only:
+
+```{r}
+REAL_VIDEO_FILENAME <- "21__kitchen_still" 
+FAKE_VIDEO_FILENAME <- "21_07__kitchen_still__MKU99DVX" 
+
+dta_agg_long <- dta_preprocessed_smth %>%
+  select(video_filename, frame, AU17_r, smth_AU17_r, isfakeorreal) %>% 
+  filter(video_filename %in% c(REAL_VIDEO_FILENAME, FAKE_VIDEO_FILENAME)) %>%
+  tidyr::pivot_longer(
+    cols = c(AU17_r, smth_AU17_r),
+    names_to = "Type",
+    values_to = "Intensity"
+  )
+
+base_theme <- theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.title.y = element_text(size = 18, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 18, color = "black"),
+    axis.text.y  = element_text(size = 16, color = "black"),
+    axis.text.x  = element_text(size = 16, color = "black"),
+    plot.title   = element_text(size = 18, face = "bold", color = "black", hjust = 0.5),
+    plot.margin  = margin(10, 10, 10, 10),
+    strip.background = element_rect(fill = "grey90", color = NA),
+    strip.text = element_text(size = 16, face = "bold", color = "black")
+  )
+
+y_limits <- range(dta_agg_long$Intensity, na.rm = T)
+
+# plot 1
+p_raw <- dta_agg_long %>%
+  filter(Type == "AU17_r") %>%
+  ggplot(aes(x = frame, y = Intensity)) +
+  geom_line(color = "#1b9e77", alpha = 0.6, linewidth = 0.8) +
+  facet_wrap(~ isfakeorreal) +
+  labs(
+    title = "Raw",
+    x = NULL,
+    y = "AU Intensity"
+  ) +
+  scale_y_continuous(limits = y_limits, expand = expansion(mult = c(0, 0.08))) +
+  base_theme
+
+# plot 2
+p_smth <- dta_agg_long %>%
+  filter(Type == "smth_AU17_r") %>%
+  ggplot(aes(x = frame, y = Intensity)) +
+  geom_line(color = "#d95f02", linewidth = 0.8) +
+  facet_wrap(~ isfakeorreal) +
+  labs(
+    title = "Smoothed",
+    x = "Frame",
+    y = "AU Intensity"
+  ) +
+  scale_y_continuous(limits = y_limits, expand = expansion(mult = c(0, 0.08))) +
+  base_theme
+
+# combine plots
+p_raw / p_smth +
+  plot_annotation(
+    title = "AU17 - Before vs. After Smoothing", 
+    subtitle = "21_07__kitchen_still__MKU99DVX + 21__kitchen_still",
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5, color = "black")
+    )
+  )
+```
+
+Feature bar charts:
+
+```{r, fig.width=5, fig.height=5}
+REAL_VIDEO_FILENAME <- "21__kitchen_still" 
+FAKE_VIDEO_FILENAME <- "21_07__kitchen_still__MKU99DVX" 
+
+au17_feature <- "diff1x_pacf5_AU17_chin_raiser"
+
+dta_feature_compare <- dta_cmfts_output_imputed_zerosd %>%
+  filter(video_filename %in% c(REAL_VIDEO_FILENAME, FAKE_VIDEO_FILENAME)) %>%
+  select(video_filename, isfakeorreal, all_of(au17_feature)) %>%
+  rename(Value = all_of(au17_feature))
+
+
+ggplot(dta_feature_compare, aes(x = isfakeorreal, y = Value, fill = isfakeorreal)) +
+  
+  # Use geom_col() for a bar chart
+  geom_col(width = 0.6, color = "black") +
+  
+  # Add text labels to show the exact value
+  geom_text(aes(label = round(Value, 2)), vjust = -0.5, size = 5) +
+  
+  # Use the same colors as your other plots
+  scale_fill_manual(
+    values = c("real" = "#1b9e77", "fake" = "#d95f02"),
+    guide = "none" # Hide the legend, as the x-axis is clear
+  ) +
+  
+  labs(
+    title = au17_feature,
+    x = NULL,
+    y = "Feature Value (Z-scored)"
+  ) +
+  
+  # Use a theme similar to your others
+  theme_classic(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.text.x = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14),
+    axis.title.y = element_text(size = 16)
+  )
+```
+
+# Classifiers w/ Balanced Emotion
+
+## Random Forest
+
+```{r}
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+rf_fit_model1_balanced_cv <- caret::train(
+  isfakeorreal ~ ., # nmf
+  data = dta_classifier_train_new_balanced_scaled[, -(1:2)],
+  method = "rf",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneLength = 5
+)
+
+print(rf_fit_model1_balanced_cv)
+plot(caret::varImp(rf_fit_model1_balanced_cv)) # To see feature importance
+```
+
+Evaluate on test data:
+
+```{r}
+rf_model_1_balanced_cv_performance <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_balanced_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_model_1_balanced_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(rf_fit_model1_balanced_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+```         
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   33   16
+      real   14   31
+                                          
+               Accuracy : 0.6809          
+                 95% CI : (0.5767, 0.7733)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.000294        
+                                          
+                  Kappa : 0.3617          
+                                          
+ Mcnemar's Test P-Value : 0.855132        
+                                          
+            Sensitivity : 0.7021          
+            Specificity : 0.6596          
+         Pos Pred Value : 0.6735          
+         Neg Pred Value : 0.6889          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3511          
+   Detection Prevalence : 0.5213          
+      Balanced Accuracy : 0.6809          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+Area under the curve: 0.6815
+95% CI: 0.5707-0.7923 (DeLong)
+```
+
+### Sensitivity Analysis - Emotion Subsets with Balanced Model
+
+```{r}
+cat("--- EMOTION VIDEOS (n=58) ---\n")
+
+# Get predictions on emotion subset
+rf_balanced_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_balanced_cv, newdata = dta_classifier_test_new_emotion),
+  reference = dta_classifier_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_balanced_emotion)
+
+# Calculate ROC-AUC for emotion subset
+y_test_emotion <- factor(dta_classifier_test_new_emotion$isfakeorreal, levels = c("real", "fake"))
+p_fake_emotion <- predict(rf_fit_model1_balanced_cv, 
+                          newdata = dta_classifier_test_new_emotion, 
+                          type = "prob")[, "fake"]
+
+roc_obj_emotion <- pROC::roc(y_test_emotion, p_fake_emotion, levels = c("real", "fake"))
+auc_emotion <- pROC::auc(roc_obj_emotion)
+ci_emotion <- pROC::ci.auc(roc_obj_emotion)
+
+cat(sprintf("\nROC-AUC: %.4f\n", auc_emotion))
+cat(sprintf("95%% CI: %.4f - %.4f\n\n", ci_emotion[1], ci_emotion[3]))
+```
+
+No emotion:
+
+```{r}
+cat("--- NO EMOTION VIDEOS (n=36) ---\n")
+
+# Get predictions on no emotion subset
+rf_balanced_no_emotion <- caret::confusionMatrix(
+  data = predict(rf_fit_model1_balanced_cv, newdata = dta_classifier_test_new_no_emotion),
+  reference = dta_classifier_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+
+print(rf_balanced_no_emotion)
+
+# Calculate ROC-AUC for no emotion subset
+y_test_no_emotion <- factor(dta_classifier_test_new_no_emotion$isfakeorreal, levels = c("real", "fake"))
+p_fake_no_emotion <- predict(rf_fit_model1_balanced_cv, 
+                             newdata = dta_classifier_test_new_no_emotion, 
+                             type = "prob")[, "fake"]
+
+roc_obj_no_emotion <- pROC::roc(y_test_no_emotion, p_fake_no_emotion, levels = c("real", "fake"))
+auc_no_emotion <- pROC::auc(roc_obj_no_emotion)
+ci_no_emotion <- pROC::ci.auc(roc_obj_no_emotion)
+
+cat(sprintf("\nROC-AUC: %.4f\n", auc_no_emotion))
+cat(sprintf("95%% CI: %.4f - %.4f\n\n", ci_no_emotion[1], ci_no_emotion[3]))
+```
+
+Comparison:
+
+```{r}
+cat("ORIGINAL MODEL (trained on imbalanced data: 222 emotion, 148 no emotion):\n")
+cat(sprintf("  Emotion videos (n=58):    Accuracy = %.1f%%, Sensitivity = %.1f%%, Specificity = %.1f%%\n",
+            rf_model_1_emotion$overall["Accuracy"] * 100,
+            rf_model_1_emotion$byClass["Sensitivity"] * 100,
+            rf_model_1_emotion$byClass["Specificity"] * 100))
+cat(sprintf("  No Emotion videos (n=36): Accuracy = %.1f%%, Sensitivity = %.1f%%, Specificity = %.1f%%\n",
+            rf_model_1_no_emotion$overall["Accuracy"] * 100,
+            rf_model_1_no_emotion$byClass["Sensitivity"] * 100,
+            rf_model_1_no_emotion$byClass["Specificity"] * 100))
+cat(sprintf("  >> Performance gap: %.1f%% accuracy difference\n\n",
+            (rf_model_1_emotion$overall["Accuracy"] - rf_model_1_no_emotion$overall["Accuracy"]) * 100))
+
+cat("BALANCED MODEL (trained on balanced data: 222 emotion, 222 no emotion):\n")
+cat(sprintf("  Emotion videos (n=58):    Accuracy = %.1f%%, Sensitivity = %.1f%%, Specificity = %.1f%%\n",
+            rf_balanced_emotion$overall["Accuracy"] * 100,
+            rf_balanced_emotion$byClass["Sensitivity"] * 100,
+            rf_balanced_emotion$byClass["Specificity"] * 100))
+cat(sprintf("  No Emotion videos (n=36): Accuracy = %.1f%%, Sensitivity = %.1f%%, Specificity = %.1f%%\n",
+            rf_balanced_no_emotion$overall["Accuracy"] * 100,
+            rf_balanced_no_emotion$byClass["Sensitivity"] * 100,
+            rf_balanced_no_emotion$byClass["Specificity"] * 100))
+cat(sprintf("  >> Performance gap: %.1f%% accuracy difference\n\n",
+            (rf_balanced_emotion$overall["Accuracy"] - rf_balanced_no_emotion$overall["Accuracy"]) * 100))
+
+
+```
+
+## C5.0B
+
+```{r}
+# Cross validation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+c50_fit_model1_balanced_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_balanced_scaled[, -(1:2)],
+  method = "C5.0",
+  metric = "ROC",
+  trControl = classifier_control,
+  tuneGrid = expand.grid(
+    model = "tree",
+    trials = c(1, 10, 20, 30),  # number of boosting iterations
+    winnow = FALSE
+  )
+)
+
+print(c50_fit_model1_balanced_cv)
+plot(caret::varImp(c50_fit_model1_balanced_cv)) # To see feature importanc
+```
+
+Evaluate on test data:
+
+```{r}
+c50_model_1_balanced_cv_performance <- caret::confusionMatrix(
+  data = predict(c50_fit_model1_balanced_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(c50_model_1_balanced_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(c50_fit_model1_balanced_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+```         
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   30   23
+      real   17   24
+                                          
+               Accuracy : 0.5745          
+                 95% CI : (0.4682, 0.6759)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.08983         
+                                          
+                  Kappa : 0.1489          
+                                          
+ Mcnemar's Test P-Value : 0.42920         
+                                          
+            Sensitivity : 0.6383          
+            Specificity : 0.5106          
+         Pos Pred Value : 0.5660          
+         Neg Pred Value : 0.5854          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3191          
+   Detection Prevalence : 0.5638          
+      Balanced Accuracy : 0.5745          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+Area under the curve: 0.56
+95% CI: 0.4423-0.6776 (DeLong)
+```
+
+## SVM
+
+```{r}
+# Cross-valiation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+svm_model1_balanced_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_balanced_scaled[, -(1:2)],
+  method = "svmRadial",  # RBF kernel
+  trControl = classifier_control
+)
+```
+
+Evaluate on test data:
+
+```{r}
+svm_model_1_balanced_cv_performance <- caret::confusionMatrix(
+  data = predict(svm_model1_balanced_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(svm_model_1_balanced_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(svm_model1_balanced_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+```         
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   30   14
+      real   17   33
+                                          
+               Accuracy : 0.6702          
+                 95% CI : (0.5656, 0.7638)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.0006307       
+                                          
+                  Kappa : 0.3404          
+                                          
+ Mcnemar's Test P-Value : 0.7194375       
+                                          
+            Sensitivity : 0.6383          
+            Specificity : 0.7021          
+         Pos Pred Value : 0.6818          
+         Neg Pred Value : 0.6600          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3191          
+   Detection Prevalence : 0.4681          
+      Balanced Accuracy : 0.6702          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+Area under the curve: 0.713
+95% CI: 0.608-0.818 (DeLong)
+```
+
+## Logistic Regression
+
+```{r}
+# Cross-valiation setup
+classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+lr_model1_balanced_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_classifier_train_new_balanced_scaled[, -(1:2)],
+  method = "glm",  # Generalised linear models
+  family = "binomial",
+  trControl = classifier_control
+)
+
+plot(caret::varImp(lr_model1_balanced_cv)) # To see feature importance
+```
+
+Evaluate on test data:
+
+```{r}
+lr_model1_balanced_cv_performance <- caret::confusionMatrix(
+  data = predict(lr_model1_balanced_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+
+print(lr_model1_balanced_cv_performance)
+
+
+# ROC AUC
+y_test  <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real","fake"))
+p_fake  <- predict(lr_model1_balanced_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[,"fake"]
+
+roc_obj <- pROC::roc(y_test, p_fake, levels = c("real","fake"))
+pROC::auc(roc_obj)       # ROC-AUC
+pROC::ci.auc(roc_obj)    # 95% CI (DeLong)
+```
+
+```         
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   22   21
+      real   25   26
+                                          
+               Accuracy : 0.5106          
+                 95% CI : (0.4054, 0.6152)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.4590          
+                                          
+                  Kappa : 0.0213          
+                                          
+ Mcnemar's Test P-Value : 0.6583          
+                                          
+            Sensitivity : 0.4681          
+            Specificity : 0.5532          
+         Pos Pred Value : 0.5116          
+         Neg Pred Value : 0.5098          
+             Prevalence : 0.5000          
+         Detection Rate : 0.2340          
+   Detection Prevalence : 0.4574          
+      Balanced Accuracy : 0.5106          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+Area under the curve: 0.5405
+95% CI: 0.4226-0.6584 (DeLong)
+```
+
+# Classifiers w/ Balanced Emotion Classes (Downsampling)
+
+Previously I balanced the emotion class using bootstrap oversampling. I did this to prevent discarding many rows of data, however, this oversampling method works by adding duplicate rows to upsampling the minority class. A reviewer could argue that the classifier trained on this balanced train set is not actually learning anything different as the upsampled rows are the same. Therefore, I will run this again but this time using downsampling. This will discard data but will allow a fair comparison. Classes should be n=148 each after downsampling.
+
+```{r}
+set.seed(12345)
+# Separate by emotion class
+emotion_majority <- dta_cmfts_output_imputed_zerosd %>%
+  filter(emotion == "yes")  # n = 222
+
+emotion_minority <- dta_cmfts_output_imputed_zerosd %>%
+  filter(emotion == "no")   # n = 148
+
+cat(sprintf("Before downsampling:\n  Emotion: %d\n  No Emotion: %d\n\n",
+            nrow(emotion_majority), nrow(emotion_minority)))
+
+# Downsample majority (Emotion) to match minority (No Emotion)
+emotion_majority_downsampled <- emotion_majority %>%
+  sample_n(size = nrow(emotion_minority), replace = FALSE)
+
+# Combine
+dta_balanced_downsampled <- bind_rows(emotion_majority_downsampled, emotion_minority)
+
+cat(sprintf("After downsampling:\n  Emotion: %d\n  No Emotion: %d\n  Total: %d\n\n",
+            sum(dta_balanced_downsampled$emotion == "yes"),
+            sum(dta_balanced_downsampled$emotion == "no"),
+            nrow(dta_balanced_downsampled)))
+```
+
+```{r}
+dta_train_ds <- dta_balanced_downsampled %>%
+  select(video_filename, emotion, isfakeorreal, all_of(boruta_selected_features))
+
+# scale using same params as origina model
+feature_columns <- names(dta_train_ds)[!names(dta_train_ds) %in% 
+                                         c("video_filename", "emotion", "isfakeorreal")]
+
+dta_train_ds_scaled <- dta_train_ds
+dta_train_ds_scaled[, feature_columns] <- predict(scaling_model,
+                                                    newdata = dta_train_ds[, feature_columns])
+
+# Set factor levels
+dta_train_ds_scaled$isfakeorreal <- factor(
+  dta_train_ds_scaled$isfakeorreal,
+  levels = c("fake", "real")
+)
+
+# train rf model
+
+classifier_control_ds <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+set.seed(12345)
+
+rf_downsampled_cv <- caret::train(
+  isfakeorreal ~ .,
+  data = dta_train_ds_scaled[, -(1:2)],  # exclude video_filename and emotion
+  method = "rf",
+  metric = "ROC",
+  trControl = classifier_control_ds,
+  tuneLength = 5
+)
+
+cat("--- DOWNSAMPLED RF MODEL ---\n")
+print(rf_downsampled_cv)
+```
+
+Evaluate on test data:
+
+```{r}
+library(pROC)
+library(caret)
+
+cat("\n--- FULL TEST SET (n=94) ---\n")
+rf_ds_full <- confusionMatrix(
+  data = predict(rf_downsampled_cv, newdata = dta_classifier_test_new_scaled),
+  reference = dta_classifier_test_new_scaled$isfakeorreal,
+  positive = "fake"
+)
+print(rf_ds_full)
+
+y_full <- factor(dta_classifier_test_new_scaled$isfakeorreal, levels = c("real", "fake"))
+p_full <- predict(rf_downsampled_cv, newdata = dta_classifier_test_new_scaled, type = "prob")[, "fake"]
+roc_full <- pROC::roc(y_full, p_full, levels = c("real", "fake"))
+cat(sprintf("ROC-AUC: %.4f [%.4f, %.4f]\n\n",
+            pROC::auc(roc_full), ci.auc(roc_full)[1], ci.auc(roc_full)[3]))
+
+
+cat("--- EMOTION VIDEOS (n=58) ---\n")
+rf_ds_emotion <- confusionMatrix(
+  data = predict(rf_downsampled_cv, newdata = dta_classifier_test_new_emotion),
+  reference = dta_classifier_test_new_emotion$isfakeorreal,
+  positive = "fake"
+)
+print(rf_ds_emotion)
+
+y_em <- factor(dta_classifier_test_new_emotion$isfakeorreal, levels = c("real", "fake"))
+p_em <- predict(rf_downsampled_cv, newdata = dta_classifier_test_new_emotion, type = "prob")[, "fake"]
+roc_em <- pROC::roc(y_em, p_em, levels = c("real", "fake"))
+auc_em <- pROC::auc(roc_em)
+ci_em <- ci.auc(roc_em)
+cat(sprintf("ROC-AUC: %.4f [%.4f, %.4f]\n\n", auc_em, ci_em[1], ci_em[3]))
+
+
+cat("--- NO EMOTION VIDEOS (n=36) ---\n")
+rf_ds_no_emotion <- confusionMatrix(
+  data = predict(rf_downsampled_cv, newdata = dta_classifier_test_new_no_emotion),
+  reference = dta_classifier_test_new_no_emotion$isfakeorreal,
+  positive = "fake"
+)
+print(rf_ds_no_emotion)
+
+y_no <- factor(dta_classifier_test_new_no_emotion$isfakeorreal, levels = c("real", "fake"))
+p_no <- predict(rf_downsampled_cv, newdata = dta_classifier_test_new_no_emotion, type = "prob")[, "fake"]
+roc_no <- roc(y_no, p_no, levels = c("real", "fake"))
+auc_no <- auc(roc_no)
+ci_no <- ci.auc(roc_no)
+cat(sprintf("ROC-AUC: %.4f [%.4f, %.4f]\n\n", auc_no, ci_no[1], ci_no[3]))
+```
+
+```         
+--- FULL TEST SET (n=94) ---
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   35   22
+      real   12   25
+                                          
+               Accuracy : 0.6383          
+                 95% CI : (0.5327, 0.7349)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.004774        
+                                          
+                  Kappa : 0.2766          
+                                          
+ Mcnemar's Test P-Value : 0.122713        
+                                          
+            Sensitivity : 0.7447          
+            Specificity : 0.5319          
+         Pos Pred Value : 0.6140          
+         Neg Pred Value : 0.6757          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3723          
+   Detection Prevalence : 0.6064          
+      Balanced Accuracy : 0.6383          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+ROC-AUC: 0.6573 [0.5451, 0.7695]
+
+--- EMOTION VIDEOS (n=58) ---
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   19    9
+      real   10   20
+                                          
+               Accuracy : 0.6724          
+                 95% CI : (0.5366, 0.7899)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.005964        
+                                          
+                  Kappa : 0.3448          
+                                          
+ Mcnemar's Test P-Value : 1.000000        
+                                          
+            Sensitivity : 0.6552          
+            Specificity : 0.6897          
+         Pos Pred Value : 0.6786          
+         Neg Pred Value : 0.6667          
+             Prevalence : 0.5000          
+         Detection Rate : 0.3276          
+   Detection Prevalence : 0.4828          
+      Balanced Accuracy : 0.6724          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+ROC-AUC: 0.7265 [0.5964, 0.8566]
+
+--- NO EMOTION VIDEOS (n=36) ---
+Confusion Matrix and Statistics
+
+          Reference
+Prediction fake real
+      fake   16   13
+      real    2    5
+                                          
+               Accuracy : 0.5833          
+                 95% CI : (0.4076, 0.7449)
+    No Information Rate : 0.5             
+    P-Value [Acc > NIR] : 0.202516        
+                                          
+                  Kappa : 0.1667          
+                                          
+ Mcnemar's Test P-Value : 0.009823        
+                                          
+            Sensitivity : 0.8889          
+            Specificity : 0.2778          
+         Pos Pred Value : 0.5517          
+         Neg Pred Value : 0.7143          
+             Prevalence : 0.5000          
+         Detection Rate : 0.4444          
+   Detection Prevalence : 0.8056          
+      Balanced Accuracy : 0.5833          
+                                          
+       'Positive' Class : fake            
+                                          
+Setting direction: controls < cases
+ROC-AUC: 0.5463 [0.3434, 0.7491]
+```
+
+Comparison:
+
+```{r}
+
+cat("================================================================\n")
+cat("COMPARISON: ORIGINAL vs DOWNSAMPLED MODEL\n")
+cat("================================================================\n\n")
+
+cat("ORIGINAL MODEL (trained on: 222 Emotion, 148 No Emotion = 370 total):\n")
+cat(sprintf("  Emotion (n=58):    Acc = %.1f%%, Sens = %.1f%%, Spec = %.1f%%, AUC = 0.765\n",
+            rf_model_1_emotion$overall["Accuracy"] * 100,
+            rf_model_1_emotion$byClass["Sensitivity"] * 100,
+            rf_model_1_emotion$byClass["Specificity"] * 100))
+cat(sprintf("  No Emotion (n=36): Acc = %.1f%%, Sens = %.1f%%, Spec = %.1f%%, AUC = 0.605\n",
+            rf_model_1_no_emotion$overall["Accuracy"] * 100,
+            rf_model_1_no_emotion$byClass["Sensitivity"] * 100,
+            rf_model_1_no_emotion$byClass["Specificity"] * 100))
+cat(sprintf("  >> Gap: %.1f pp\n\n",
+            (rf_model_1_emotion$overall["Accuracy"] - 
+               rf_model_1_no_emotion$overall["Accuracy"]) * 100))
+
+cat(sprintf("DOWNSAMPLED MODEL (trained on: 148 Emotion, 148 No Emotion = 296 total):\n"))
+cat(sprintf("  Emotion (n=58):    Acc = %.1f%%, Sens = %.1f%%, Spec = %.1f%%, AUC = %.3f\n",
+            rf_ds_emotion$overall["Accuracy"] * 100,
+            rf_ds_emotion$byClass["Sensitivity"] * 100,
+            rf_ds_emotion$byClass["Specificity"] * 100,
+            auc_em))
+cat(sprintf("  No Emotion (n=36): Acc = %.1f%%, Sens = %.1f%%, Spec = %.1f%%, AUC = %.3f\n",
+            rf_ds_no_emotion$overall["Accuracy"] * 100,
+            rf_ds_no_emotion$byClass["Sensitivity"] * 100,
+            rf_ds_no_emotion$byClass["Specificity"] * 100,
+            auc_no))
+cat(sprintf("  >> Gap: %.1f pp\n",
+            (rf_ds_emotion$overall["Accuracy"] - 
+               rf_ds_no_emotion$overall["Accuracy"]) * 100))
+```
+
+Pattern holds. The gap is less (16.9 to 8.9 pp) but key finding is preserved (emotion videos are significantly above chance (67.2%, p = .006) whereas no emotion videos remain non-significant (58.3%, p =.203)).
+
+# Emotion Classification Model
+
+To test whether the emotional signal itself is weaker in fakes.
+
+```{r}
+# Filter training data to include ONLY real videos
+dta_emotion_train_real_only <- dta_classifier_train_new_scaled %>%
+  filter(isfakeorreal == "real")
+
+cat(sprintf("Original training set size: %d videos\n", nrow(dta_classifier_train_new_scaled)))
+cat(sprintf("Real-only training set size: %d videos\n", nrow(dta_emotion_train_real_only)))
+
+# Check class distribution
+emotion_distribution <- table(dta_emotion_train_real_only$emotion)
+cat("\nEmotion distribution in real-only training data:\n")
+print(emotion_distribution)
+```
+
+Balance emotion class
+
+```{r}
+# Determine majority and minority classes
+if (emotion_distribution["yes"] > emotion_distribution["no"]) {
+  majority_class <- "yes"
+  minority_class <- "no"
+  n_majority <- emotion_distribution["yes"]
+  n_minority <- emotion_distribution["no"]
+} else {
+  majority_class <- "no"
+  minority_class <- "yes"
+  n_majority <- emotion_distribution["no"]
+  n_minority <- emotion_distribution["yes"]
+}
+
+cat(sprintf("\nMajority class: %s (n=%d)\n", majority_class, n_majority))
+cat(sprintf("Minority class: %s (n=%d)\n", minority_class, n_minority))
+
+# Option 1: Undersample majority class (recommended - no data duplication)
+set.seed(12345)
+majority_data <- dta_emotion_train_real_only %>%
+  filter(emotion == majority_class)
+minority_data <- dta_emotion_train_real_only %>%
+  filter(emotion == minority_class)
+
+# Randomly sample from majority to match minority size
+majority_data_downsampled <- majority_data %>%
+  sample_n(size = n_minority, replace = FALSE)
+
+# Combine to create balanced dataset
+dta_emotion_train_balanced <- bind_rows(majority_data_downsampled, minority_data) %>%
+  arrange(video_filename)  # Shuffle is done in train() function
+
+cat(sprintf("\nBalanced training set size: %d videos\n", nrow(dta_emotion_train_balanced)))
+cat("\nBalanced emotion distribution:\n")
+print(table(dta_emotion_train_balanced$emotion))
+
+# Convert emotion to factor with explicit levels
+dta_emotion_train_balanced$emotion <- factor(
+  dta_emotion_train_balanced$emotion,
+  levels = c("no", "yes")
+)
+```
+
+Train classifier:
+
+```{r}
+emotion_classifier_control <- caret::trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = caret::twoClassSummary
+)
+
+# Train Random Forest to predict EMOTION (not isfakeorreal)
+set.seed(12345)
+
+cat("\nTraining Random Forest to classify emotion (yes/no) using only real videos...\n")
+
+rf_emotion_classifier <- caret::train(
+  emotion ~ .,  # Predict emotion instead of isfakeorreal
+  data = dta_emotion_train_balanced[, !names(dta_emotion_train_balanced) %in% 
+                                      c("video_filename", "isfakeorreal")],
+  method = "rf",
+  metric = "ROC",
+  trControl = emotion_classifier_control,
+  tuneLength = 5
+)
+
+print(rf_emotion_classifier)
+
+# Plot feature importance
+cat("\nFeature Importance for Emotion Classification:\n")
+plot(caret::varImp(rf_emotion_classifier))
+```
+
+Evaluate on REAL test data:
+
+```{r}
+dta_test_real_only <- dta_classifier_test_new_scaled %>%
+  filter(isfakeorreal == "real")
+
+cat(sprintf("Number of real videos in test set: %d\n", nrow(dta_test_real_only)))
+
+# Ensure emotion is a factor with correct levels
+dta_test_real_only$emotion <- factor(
+  dta_test_real_only$emotion,
+  levels = c("no", "yes")
+)
+
+# Get predictions
+emotion_pred_real <- caret::confusionMatrix(
+  data = predict(rf_emotion_classifier, newdata = dta_test_real_only),
+  reference = dta_test_real_only$emotion,
+  positive = "yes"
+)
+
+cat("\nPerformance on REAL videos:\n")
+print(emotion_pred_real)
+
+# Calculate ROC-AUC for real videos
+y_test_real <- factor(dta_test_real_only$emotion, levels = c("no", "yes"))
+p_emotion_real <- predict(rf_emotion_classifier, 
+                          newdata = dta_test_real_only, 
+                          type = "prob")[, "yes"]
+
+roc_obj_real <- pROC::roc(y_test_real, p_emotion_real, levels = c("no", "yes"))
+auc_real <- pROC::auc(roc_obj_real)
+ci_real <- pROC::ci.auc(roc_obj_real)
+
+cat(sprintf("\nROC-AUC on REAL videos: %.4f [%.4f, %.4f]\n", 
+            auc_real, ci_real[1], ci_real[3]))
+```
+
+Evaluate on FAKE test data:
+
+```{r}
+cat("\n\n--- Step 5: Testing on FAKE Videos ---\n")
+
+# Filter test set to fake videos only
+dta_test_fake_only <- dta_classifier_test_new_scaled %>%
+  filter(isfakeorreal == "fake")
+
+cat(sprintf("Number of fake videos in test set: %d\n", nrow(dta_test_fake_only)))
+
+# Ensure emotion is a factor with correct levels
+dta_test_fake_only$emotion <- factor(
+  dta_test_fake_only$emotion,
+  levels = c("no", "yes")
+)
+
+# Get predictions
+emotion_pred_fake <- caret::confusionMatrix(
+  data = predict(rf_emotion_classifier, newdata = dta_test_fake_only),
+  reference = dta_test_fake_only$emotion,
+  positive = "yes"
+)
+
+cat("\nPerformance on FAKE videos:\n")
+print(emotion_pred_fake)
+
+# Calculate ROC-AUC for fake videos
+y_test_fake <- factor(dta_test_fake_only$emotion, levels = c("no", "yes"))
+p_emotion_fake <- predict(rf_emotion_classifier, 
+                          newdata = dta_test_fake_only, 
+                          type = "prob")[, "yes"]
+
+roc_obj_fake <- pROC::roc(y_test_fake, p_emotion_fake, levels = c("no", "yes"))
+auc_fake <- pROC::auc(roc_obj_fake)
+ci_fake <- pROC::ci.auc(roc_obj_fake)
+
+cat(sprintf("\nROC-AUC on FAKE videos: %.4f [%.4f, %.4f]\n", 
+            auc_fake, ci_fake[1], ci_fake[3]))
+```
+
+Comparison:
+
+```{r}
+cat("\n\n=== COMPARISON: REAL vs FAKE VIDEOS ===\n\n")
+
+cat("Emotion Classifier Performance:\n")
+cat("(Trained on REAL videos only, tested on both REAL and FAKE)\n\n")
+
+cat(sprintf("REAL videos (n=%d):\n", nrow(dta_test_real_only)))
+cat(sprintf("  Accuracy:    %.1f%%\n", emotion_pred_real$overall["Accuracy"] * 100))
+cat(sprintf("  Sensitivity: %.1f%% (correctly identifies emotion='yes')\n", 
+            emotion_pred_real$byClass["Sensitivity"] * 100))
+cat(sprintf("  Specificity: %.1f%% (correctly identifies emotion='no')\n", 
+            emotion_pred_real$byClass["Specificity"] * 100))
+cat(sprintf("  ROC-AUC:     %.4f [%.4f, %.4f]\n", auc_real, ci_real[1], ci_real[3]))
+
+cat(sprintf("\nFAKE videos (n=%d):\n", nrow(dta_test_fake_only)))
+cat(sprintf("  Accuracy:    %.1f%%\n", emotion_pred_fake$overall["Accuracy"] * 100))
+cat(sprintf("  Sensitivity: %.1f%% (correctly identifies emotion='yes')\n", 
+            emotion_pred_fake$byClass["Sensitivity"] * 100))
+cat(sprintf("  Specificity: %.1f%% (correctly identifies emotion='no')\n", 
+            emotion_pred_fake$byClass["Specificity"] * 100))
+cat(sprintf("  ROC-AUC:     %.4f [%.4f, %.4f]\n", auc_fake, ci_fake[1], ci_fake[3]))
+
+# Calculate performance drop
+accuracy_drop <- (emotion_pred_real$overall["Accuracy"] - 
+                  emotion_pred_fake$overall["Accuracy"]) * 100
+auc_drop <- auc_real - auc_fake
+
+cat(sprintf("\n>> PERFORMANCE DROP on FAKE videos:\n"))
+cat(sprintf("   Accuracy: %.1f%% lower\n", accuracy_drop))
+cat(sprintf("   ROC-AUC:  %.4f lower\n", auc_drop))
+```
+
+Statistical tests:
+
+```{r}
+# Fisher's exact test to compare accuracy between real and fake
+real_correct <- sum(emotion_pred_real$table[1,1], emotion_pred_real$table[2,2])
+real_incorrect <- sum(emotion_pred_real$table[1,2], emotion_pred_real$table[2,1])
+fake_correct <- sum(emotion_pred_fake$table[1,1], emotion_pred_fake$table[2,2])
+fake_incorrect <- sum(emotion_pred_fake$table[1,2], emotion_pred_fake$table[2,1])
+
+contingency_emotion <- matrix(c(real_correct, real_incorrect,
+                                fake_correct, fake_incorrect),
+                              nrow = 2, byrow = TRUE,
+                              dimnames = list(c("Real", "Fake"),
+                                            c("Correct", "Incorrect")))
+
+cat("Contingency table for accuracy:\n")
+print(contingency_emotion)
+
+fisher_emotion <- fisher.test(contingency_emotion)
+cat(sprintf("\nFisher's exact test (Real vs Fake accuracy): p = %.4f\n", 
+            fisher_emotion$p.value))
+
+# McNemar's test is not appropriate here since we're comparing different videos
+# But we can do a proportion test
+prop_test_emotion <- prop.test(x = c(real_correct, fake_correct),
+                               n = c(nrow(dta_test_real_only), nrow(dta_test_fake_only)))
+cat(sprintf("Two-proportion z-test (Real vs Fake accuracy): p = %.4f\n", 
+            prop_test_emotion$p.value))
+```
