@@ -2,6 +2,8 @@
 
 This repository contains all the code for analysis and preprocessing associated with the manuscript:
 
+**Murphy T. J., Cook J. L., Cuve H. C. (in prep).** *Interpretable facial dynamics as behavioral and perceptual traces of deepfakes.*
+
 ## Repository Contents
 All scripts related to the paper can be found in the `Paper` folder, organised across Python and R subfolders. The scripts follow the sequence of steps outlined in the manuscript:
 
