@@ -13,4 +13,4 @@ All scripts related to the paper can be found in the `Paper` folder, organised a
 6. **Figures**: Figure 1 is generated in `Paper/Python/facial-expression-figures.ipynb`, Figure 2, 3, and 5 are generated in `Paper/Python/Final Analysis/`, Figure 4 is generated in `Paper/R/Human Analysis/`.
 
 ## Data Availability
-Supporting data is available at: 
+Supporting data is available at: https://osf.io/76agj/overview?view_only=c73a947a070b43e1abafe3e35d2cb773
