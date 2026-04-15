@@ -1,6 +1,0 @@
-"0",""
-"0","# If still NAs, check which stimnopath values are causing them"
-"0","aoi_summary %>%"
-"0","  filter(is.na(dplf_bin_fake_accuracy)) %>%"
-"0","  count(stimnopath) %>%"
-"0","  arrange(desc(n))"

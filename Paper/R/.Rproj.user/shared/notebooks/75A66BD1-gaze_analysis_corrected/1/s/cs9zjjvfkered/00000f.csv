@@ -1,7 +1,0 @@
-"0","cluster_results_k2 %>%"
-"0","  filter(stimnopath %in% unique(stimnopath)[1:6]) %>%"
-"0","  ggplot(aes(mean_x, mean_y, colour = cluster)) +"
-"0","  geom_point(alpha = 0.3) +"
-"0","  scale_y_reverse() +"
-"0","  facet_wrap(~stimnopath) +"
-"0","  coord_fixed()"
